@@ -33,94 +33,71 @@ A secondary idempotency guard (`<!-- ol-pr-bot -->` HTML comment embedded in eve
 
 ---
 
-## What the bot does for each eligible PR
+## How it works: two-part architecture
 
-### 1. Assign Copilot as reviewer
+The system has two components that work together each hour:
 
-`gh pr edit {number} --add-reviewer copilot`
+**Part 1 — `new_pr_bot.py` (data gatherer, runs first)**
 
-This serves two purposes: it triggers GitHub Copilot's automated code review, and it acts as the "we've seen this PR" flag for future runs.
+For each eligible PR the script:
+1. Assigns Copilot as reviewer (`gh pr edit {number} --add-reviewer copilot`)
+2. Gathers signals via `gh` API calls
+3. Prints a JSON array to stdout — one object per eligible PR
 
-> **Note for maintainers:** If the `copilot` reviewer identifier ever stops working (GitHub may change this), look for the correct handle in your repository's reviewer suggestions UI and update the string `'copilot'` in `request_copilot_review()`.
+> **Note:** If the `copilot` reviewer identifier ever stops working, update the string `'copilot'` in `request_copilot_review()` and the `_COPILOT_LOGINS` set.
 
-### 2. Gather hard-coded signals
+Signals gathered per PR:
 
-These are cheap binary checks done via `gh` API calls before the LLM is invoked:
+| Field | Method |
+|---|---|
+| `first_contribution` | Count all PRs by this author (`--state all`) == 1 |
+| `has_issue_reference` | Regex `#\d+` anywhere in PR body |
+| `linked_issue_number` | First `#NNN` match in body |
+| `linked_issue_priority` | Priority label on linked issue (`Priority: 0/1/2`) |
+| `assignee_issue_count` | Open issues for the assignee at equal/higher priority |
+| `ci_failing` | check-runs API; treats `failure`, `timed_out`, `cancelled`, `action_required` as failing |
+| `is_design_pr` | Label contains "design" OR files touch `static/css/` |
+| `has_visual_evidence` | Regex for markdown images, video URLs, GitHub CDN in body |
+| `files_changed` | List of `{path, additions, deletions}` |
+| `test_files` | Patches of changed test files (capped at 2000 chars each) |
+| `commit_messages` | First line of each commit message |
+| `copilot_assigned` | Whether the Copilot assignment succeeded |
+| `dry_run` | True if `--dry-run` was passed |
 
-| Signal | Method | Used for |
-|---|---|---|
-| First-time contributor | Count all PRs by this author (`--state all`) == 1 | Decide whether to show the welcome + triage block |
-| Issue reference | Regex `#\d+` anywhere in PR body | Passed to LLM as `has_linked_issue`; informs quality concern judgment |
-| Open issue check | Verify the referenced issue is actually open via API | Passed to LLM — a closed or missing issue may indicate a misdirected PR |
-| CI status | GitHub check-runs API on head commit SHA; treats `failure`, `timed_out`, `cancelled`, `action_required` as failing | Hard-coded ⛔ section |
-| Design PR | Label contains "design" OR files touch `static/css/` | Hard-coded 📸 section |
-| Visual evidence | Regex for markdown images, video URLs, GitHub CDN | Suppresses 📸 section if present |
+**Part 2 — Claude Code agent (reads JSON, writes comments)**
 
-### 3. LLM analysis (Claude)
+The agent is invoked with the prompt in the **Scheduling** section below. It reads the JSON output, uses this README as its guide, and posts a comment on each PR via `gh pr comment`. If `dry_run` is true, it prints what it would post instead.
 
-The script calls `claude-opus-4-6` with a structured prompt and a JSON payload containing:
-
-- PR title and body (capped at 3000 chars)
-- List of changed files with addition/deletion counts
-- Content of changed test files (capped at 2000 chars per file, up to 5 files)
-- All commit messages
-- Labels
-- The pre-computed hard-coded signals above
-
-Claude returns a JSON object with four nullable fields:
-
-```json
-{
-  "quality_concern": null,     // unprompted refactor / no clear purpose
-  "test_concern": null,        // missing or over-engineered tests
-  "git_concern": null,         // messy commit history, upstream merges
-  "template_concern": null     // obviously missing Testing or Screenshot sections
-}
-```
-
-Each non-null value is a 2–4 sentence markdown string ready to paste directly into the comment. Claude is instructed to return `null` unless a concern is clearly warranted — erring toward silence over noise.
-
-If `ANTHROPIC_API_KEY` is not set or the `anthropic` package is not installed, the LLM step is skipped (a `[LLM] ... skipping LLM analysis.` message is printed to stdout) and only the hard-coded sections appear.
-
-### 4. Assemble and post the comment
-
-Sections appear in this order, each only if its condition is met:
+### Comment structure Claude should follow
 
 ```
-:tada:  First-timer welcome                      (if first contribution)
-        Assignee workload OR Mon/Fri triage msg   (if first contribution)
-🤖      Copilot mention                           (if first contribution)
+:tada:  First-timer welcome                      (if first_contribution)
+        Assignee workload OR Mon/Fri triage msg   (if first_contribution)
+🤖      Copilot mention                           (if first_contribution)
 
-🚦      quality_concern    (LLM)
-🧪      test_concern       (LLM)
-⚠️      git_concern        (LLM)
-🚦      template_concern   (LLM)
+        Quality / test / git / template concerns  (Claude's judgment)
 
-📸      No screenshot      (hard-coded, design PRs without visual evidence,
-                            only if LLM didn't already flag template_concern)
-⛔      CI failing         (hard-coded)
+📸      No screenshot                             (if is_design_pr and not has_visual_evidence)
+⛔      CI failing                                (if ci_failing)
 
         Footer + <!-- ol-pr-bot --> marker
 ```
 
-If no section fires, no comment is posted.
+If nothing warrants a comment, post nothing.
 
 ---
 
 ## Design decisions and trade-offs
 
-### Why LLM for some checks and not others?
+### Why split into script + Claude Code agent?
 
-Binary checks (CI status, first-timer, issue reference, visual evidence) are cheap, reliable, and have no need for judgment. They're done with API calls.
+Binary checks (CI status, first-timer, issue reference, visual evidence) are cheap, reliable, and don't need judgment — the script handles them with `gh` API calls.
 
-Nuanced checks (is the PR a pointless refactor? are tests meaningful? is the commit history confusing?) benefit enormously from natural language understanding. A regex for "messy commits" would produce false positives. Claude can read "feat: add user endpoint" vs "fix", "fix2", "oops", "final" and understand which pattern suggests a contributor who might benefit from a rebase tip.
+Nuanced analysis (is this PR a pointless refactor? are tests meaningful? does the commit history show confusion?) benefits from natural language understanding. Claude Code provides this without needing a separate API key or credits — it uses the same session the maintainer already has.
 
-### Why structured segments instead of a fully free-form LLM comment?
+### Why does the script output JSON instead of posting directly?
 
-Two reasons:
-
-1. **Predictability.** Maintainers and contributors can know what to expect. The hard-coded sections (welcome, CI, screenshot) are guaranteed to appear in the right cases regardless of what the LLM says.
-2. **Graceful degradation.** If the LLM API is down or the key is missing, the hard-coded sections still post. The comment is never empty because of an API outage.
+It separates concerns cleanly: the script knows GitHub's data model, Claude Code knows how to read context and write warmly. It also makes the system easy to test — pipe the JSON output anywhere, inspect it, replay it.
 
 ### Why Copilot-assigned = staff PR?
 
@@ -153,51 +130,50 @@ Default lookback is 1 hour (`--hours 1`). For testing, use `--hours 24` or `--ho
 ### Adding a new hard-coded signal
 
 1. Add a function (following the pattern of `is_ci_failing`, `is_design_pr`, etc.)
-2. Call it in `process_pr()` and add the result to `signals`
-3. Pass it to `build_comment()` and add the corresponding section there
+2. Call it in `process_pr()` and include the result in the returned dict
+3. The Claude Code agent will see it in the JSON and can act on it if the README describes the expected behaviour
 
 ---
 
 ## Running and scheduling
 
-### Manual run (dry-run first)
-
-```bash
-# See what would happen without touching GitHub
-ANTHROPIC_API_KEY=sk-... python3 scripts/gh_scripts/new_pr_bot.py --dry-run --hours 24
-
-# Live run against the last hour
-ANTHROPIC_API_KEY=sk-... python3 scripts/gh_scripts/new_pr_bot.py
-```
-
 ### Dependencies
 
 ```bash
-pip install anthropic>=0.40.0
-# gh CLI must be authenticated: gh auth login
+# No Python packages needed — stdlib + gh CLI only
+gh auth login   # if not already authenticated
 ```
 
-### Scheduling via Claude Code
+### Manual run (dry-run)
 
-Use the `/schedule` skill in Claude Code to run hourly:
+```bash
+cd /path/to/openlibrary-pam
+python3 scripts/gh_scripts/new_pr_bot.py --dry-run --hours 24
+```
+
+Status messages go to stderr; the JSON array goes to stdout. Pipe to `python3 -m json.tool` to pretty-print.
+
+### Claude Code scheduled prompt
+
+Use `/schedule` in Claude Code (or set up a desktop scheduled task) with this prompt:
 
 ```
-Every hour: python3 /path/to/openlibrary/scripts/gh_scripts/new_pr_bot.py
-```
+cd /path/to/openlibrary-pam
+Run: python3 scripts/gh_scripts/new_pr_bot.py --hours 1
 
-Make sure `ANTHROPIC_API_KEY` is available in the environment where the schedule runs.
-
-### Scheduling via cron
-
-```cron
-0 * * * * cd /path/to/openlibrary && ANTHROPIC_API_KEY=sk-... python3 scripts/gh_scripts/new_pr_bot.py >> /tmp/pr_bot.log 2>&1
+Read the JSON array from stdout. For each PR object, read
+scripts/gh_scripts/PR_PREREVIEW_README.md to decide what comment to post.
+Then post it with:
+  gh pr comment {number} --repo internetarchive/openlibrary --body "COMMENT"
+Always include <!-- ol-pr-bot --> at the end of every comment you post.
+If dry_run is true in the entry, print the comment instead of posting it.
 ```
 
 ---
 
 ## Canonical resource URLs
 
-These URLs are the authoritative links cited in bot comments and injected into the LLM system prompt. They are defined as named constants at the top of `new_pr_bot.py` so both the script and any AI agent reading this file have a single place to update them.
+These URLs are cited in bot comments by the Claude Code agent. They are defined as named constants at the top of `new_pr_bot.py` so both the script and any AI agent reading this file have a single place to update them.
 
 | Constant | URL | Purpose |
 |---|---|---|

@@ -1,34 +1,32 @@
 #!/usr/bin/env python3
 """
-Open Library PR pre-review bot.
+Open Library PR pre-review bot — data gatherer.
 
-Runs hourly. For every recently-opened, non-draft PR that has no comments yet
-and no Copilot reviewer assigned:
+Runs hourly (via a Claude Code scheduled task). For every recently-opened,
+non-draft PR that has no comments yet and no Copilot reviewer assigned:
 
-  1. Assigns Copilot as a reviewer (the "staff PR" signal — see README).
-  2. Builds a comment from two layers:
-       a. Hard-coded template sections (first-timer welcome, assignee/triage,
-          CI failure notice) determined by cheap API checks.
-       b. LLM-generated sections where nuanced judgment is needed (PR quality,
-          test coverage, git hygiene, template compliance). Claude returns
-          null for any field where no concern is warranted.
-  3. Posts the assembled comment.
+  1. Assigns Copilot as a reviewer.
+  2. Gathers signals (first-timer, linked issue, CI status, design, etc.)
+     plus rich PR data (files, commits, assignee workload).
+  3. Prints a JSON array to stdout.
 
-See PR_PREREVIEW_README.md for full rationale and tuning guide.
+The calling Claude Code agent reads that JSON alongside PR_PREREVIEW_README.md
+and decides what comment (if any) to post on each PR.
 
 Usage:
     python3 new_pr_bot.py [--hours N] [--dry-run] [--repo owner/repo]
 
-Environment:
-    ANTHROPIC_API_KEY   Required for LLM analysis (falls back gracefully if absent)
-    gh CLI              Must be authenticated via `gh auth login`
+    --dry-run   Skip Copilot assignment; set dry_run=true in JSON output so
+                the Claude Code agent knows to print rather than post.
+
+Requirements:
+    gh CLI authenticated via `gh auth login`
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
@@ -36,22 +34,11 @@ import time
 from datetime import datetime, timedelta, timezone
 
 # ---------------------------------------------------------------------------
-# Optional Anthropic import — degrade gracefully if not installed
-# ---------------------------------------------------------------------------
-try:
-    import anthropic as _anthropic
-
-    _ANTHROPIC_AVAILABLE = True
-except ImportError:
-    _ANTHROPIC_AVAILABLE = False
-
-# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 DEFAULT_REPO = 'internetarchive/openlibrary'
 BOT_MARKER = '<!-- ol-pr-bot -->'
-LLM_MODEL = 'claude-opus-4-6'
 
 # Any #NNN reference in the PR body counts as a linked issue
 ISSUE_REF_RE = re.compile(r'#(\d+)')
@@ -65,9 +52,8 @@ VISUAL_EVIDENCE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Resource URLs used in comments and injected into the LLM system prompt so
-# Claude can cite them directly. Keep these up-to-date as the canonical
-# reference list for AI agents reading this file.
+# Resource URLs — keep up-to-date; Claude Code reads these via the README and
+# uses them when composing comments.
 GIT_CHEATSHEET_URL = 'https://github.com/internetarchive/openlibrary/wiki/git'
 PR_TEMPLATE_URL = (
     'https://github.com/internetarchive/openlibrary/blob/master/'
@@ -84,80 +70,11 @@ CONTRIBUTING_URL = (
 # Known Copilot reviewer logins — exact match to avoid false positives
 _COPILOT_LOGINS = frozenset({'copilot', 'github-copilot[bot]'})
 
-# CI check conclusions that should be treated as "failing"
+# CI check conclusions treated as "failing"
 _CI_FAILING_CONCLUSIONS = frozenset({'failure', 'timed_out', 'cancelled', 'action_required'})
 
-# Priority labels go from 0 (highest) to MAX_PRIORITY (lowest); cap to avoid runaway API loops
+# Priority labels: 0 (highest) … _MAX_PRIORITY; cap to avoid runaway API loops
 _MAX_PRIORITY = 2
-
-# ---------------------------------------------------------------------------
-# System prompt for LLM analysis
-# ---------------------------------------------------------------------------
-
-def _build_system_prompt() -> str:
-    """Build the LLM system prompt, injecting canonical resource URLs."""
-    return f"""\
-You are a warm, experienced open-source mentor reviewing a new pull request for \
-the Open Library project (https://openlibrary.org), a non-profit digital library \
-run by the Internet Archive. Contributors range from first-timers to seasoned \
-engineers, so your tone should always be encouraging and specific — like a senior \
-teammate leaving a code review, never a gatekeeper.
-
-Your job is to flag genuine concerns that would make this PR hard to review or \
-merge. You will receive a JSON object describing the PR. Return a JSON object \
-with exactly these four fields (each is either null or a short markdown string):
-
-{{
-  "quality_concern": null,
-  "test_concern": null,
-  "git_concern": null,
-  "template_concern": null
-}}
-
-Guidelines for each field:
-
-quality_concern
-  Set to a message ONLY if the PR appears to be an unprompted, disruptive change
-  with no clear motivation — e.g. a large codebase-wide refactor, style sweep, or
-  dependency bump that wasn't discussed in an issue. Do NOT flag:
-  - i18n/translation improvements
-  - Accessibility fixes
-  - Clear bug fixes, even small ones
-  - PRs that reference an issue (has_linked_issue=true)
-  When in doubt, leave null. Reviewers can ask; we don't want to discourage
-  legitimate contributions. See: {CONTRIBUTING_URL}
-
-test_concern
-  Set to a message if the changed code paths clearly lack any tests AND the
-  change is non-trivial. Also flag if tests look AI-generated (repetitive,
-  exhaustive edge cases for trivial logic, over-mocked). We aim for meaningful
-  coverage, not perfect coverage. Leave null for: pure template/CSS/i18n changes,
-  small config tweaks, documentation.
-
-git_concern
-  Set to a message if the commit history shows clear confusion — e.g. multiple
-  upstream merge commits ("Merge branch 'master'"), dozens of "fix", "wip",
-  "update" commits suggesting iterative trial-and-error without cleanup. When
-  flagging, name the specific pattern you saw and suggest one concrete technique
-  (e.g. interactive rebase, squash). Link to: {GIT_CHEATSHEET_URL}
-
-template_concern
-  Set to a message ONLY if a required template section is obviously empty or
-  missing AND it matters for reviewability — specifically: the Testing section
-  (how to verify the fix) or the Screenshot section for UI changes. Don't flag
-  minor template gaps; prioritize the ones that block reviewers from doing their
-  job. The PR template is at: {PR_TEMPLATE_URL}
-
-Style rules:
-- 2–4 sentences max per field. Be specific (mention actual file names, commit
-  messages, or sections from what you see).
-- Use second person ("We noticed...", "It looks like..."), never accusatory.
-- End each message with a link to a relevant resource when one exists.
-- Return ONLY valid JSON. No prose outside the JSON object.
-"""
-
-
-LLM_SYSTEM_PROMPT = _build_system_prompt()
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +83,7 @@ LLM_SYSTEM_PROMPT = _build_system_prompt()
 
 
 class GHError(Exception):
-    """Raised when a gh CLI call fails."""
+    """Raised when a gh CLI call fails or times out."""
 
 
 # ---------------------------------------------------------------------------
@@ -193,9 +110,9 @@ def gh_json(args: list[str]) -> object:
 
 
 def gh_run(args: list[str], *, dry_run: bool, action_desc: str) -> bool:
-    """Run a mutative gh command; in dry-run mode, print instead."""
+    """Run a mutative gh command; in dry-run mode, log to stderr instead."""
     if dry_run:
-        print(f'  [DRY RUN] {action_desc}')
+        print(f'  [DRY RUN] {action_desc}', file=sys.stderr)
         return True
     result = _run_gh(args)
     if result.returncode != 0:
@@ -238,7 +155,7 @@ def get_recent_prs(repo: str, hours: float) -> list[dict]:
 
 def check_comments(repo: str, pr_number: int) -> tuple[bool, bool]:
     """
-    Fetch PR comments once and return (has_any_comment, has_bot_marker).
+    Fetch PR comments once, return (has_any_comment, has_bot_marker).
     On API error, returns (True, False) — fail closed to avoid double-posting.
     """
     try:
@@ -268,7 +185,7 @@ def copilot_already_assigned(repo: str, pr_number: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Hard-coded signals
+# Signal gathering
 # ---------------------------------------------------------------------------
 
 
@@ -311,10 +228,12 @@ def is_ci_failing(repo: str, pr_number: int) -> bool:
         pr_data = gh_json(['api', f'repos/{repo}/pulls/{pr_number}'])
         sha = pr_data['head']['sha']
         data = gh_json(['api', f'repos/{repo}/commits/{sha}/check-runs'])
-        return any(c.get('conclusion') in _CI_FAILING_CONCLUSIONS for c in data.get('check_runs', []))
+        return any(
+            c.get('conclusion') in _CI_FAILING_CONCLUSIONS
+            for c in data.get('check_runs', [])
+        )
     except GHError:
         pass
-    # Fallback to gh pr checks text output
     result = _run_gh(['pr', 'checks', str(pr_number), '--repo', repo])
     return result.returncode == 0 and 'fail' in result.stdout.lower()
 
@@ -347,115 +266,35 @@ def get_assignee_issue_count(repo: str, assignee: str, max_priority: int) -> int
     return total
 
 
-# ---------------------------------------------------------------------------
-# LLM analysis
-# ---------------------------------------------------------------------------
-
-
-def _get_pr_data_for_llm(repo: str, pr: dict) -> dict:
-    """Collect all data needed for LLM analysis."""
-    pr_number = pr['number']
-    pr_body = pr.get('body') or ''
-
-    # Fetch changed files
+def get_pr_files(repo: str, pr_number: int) -> tuple[list[dict], list[dict]]:
+    """Return (files_changed, test_files) for the PR."""
     files_changed = []
     test_files = []
     try:
         files = gh_json(['api', f'repos/{repo}/pulls/{pr_number}/files'])
         for f in files:
             fname = f.get('filename', '')
-            additions = f.get('additions', 0)
-            deletions = f.get('deletions', 0)
-            files_changed.append({'path': fname, 'additions': additions, 'deletions': deletions})
-            # Include patch for test files (they're the most relevant for LLM analysis)
+            files_changed.append({
+                'path': fname,
+                'additions': f.get('additions', 0),
+                'deletions': f.get('deletions', 0),
+            })
             if 'test' in fname.lower() and f.get('patch'):
                 test_files.append({'path': fname, 'patch': f['patch'][:2000]})
     except GHError:
         pass
+    return files_changed[:50], test_files[:5]
 
-    # Fetch commit messages
-    commit_messages = []
+
+def get_commit_messages(repo: str, pr_number: int) -> list[str]:
     try:
         commits = gh_json(['api', f'repos/{repo}/pulls/{pr_number}/commits'])
-        commit_messages = [
+        return [
             c.get('commit', {}).get('message', '').splitlines()[0]
             for c in commits
         ]
     except GHError:
-        pass
-
-    return {
-        'pr_title': pr.get('title', ''),
-        'pr_body': pr_body[:3000],  # cap to avoid huge token counts
-        'files_changed': files_changed[:50],
-        'test_files': test_files[:5],
-        'commit_messages': commit_messages,
-        'labels': [lb.get('name', '') for lb in pr.get('labels', [])],
-    }
-
-
-def analyze_pr_with_llm(
-    repo: str,
-    pr: dict,
-    signals: dict,
-) -> dict:
-    """
-    Call Claude to evaluate the PR and return a dict of concern fields.
-    Each field is either None or a short markdown string.
-    Falls back to all-None if the API is unavailable or returns bad JSON.
-    """
-    empty = {
-        'quality_concern': None,
-        'test_concern': None,
-        'git_concern': None,
-        'template_concern': None,
-    }
-
-    if not _ANTHROPIC_AVAILABLE:
-        print('  [LLM] anthropic package not installed — skipping LLM analysis.')
-        return empty
-
-    api_key = os.environ.get('ANTHROPIC_API_KEY', '')
-    if not api_key:
-        print('  [LLM] ANTHROPIC_API_KEY not set — skipping LLM analysis.')
-        return empty
-
-    pr_data = _get_pr_data_for_llm(repo, pr)
-    pr_data.update(signals)  # merge in the pre-computed signals
-
-    try:
-        client = _anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model=LLM_MODEL,
-            max_tokens=1024,
-            system=LLM_SYSTEM_PROMPT,
-            messages=[
-                {
-                    'role': 'user',
-                    'content': (
-                        'Please analyze this pull request and return your assessment as JSON.\n\n'
-                        + json.dumps(pr_data, indent=2)
-                    ),
-                }
-            ],
-        )
-        raw = ''.join(
-            block.text for block in response.content if hasattr(block, 'text')
-        ).strip()
-        # Strip markdown code fences if present
-        if raw.startswith('```'):
-            raw = re.sub(r'^```(?:json)?\s*', '', raw)
-            raw = re.sub(r'\s*```$', '', raw)
-        result = json.loads(raw)
-        # Normalize: keep only the expected keys, coerce empty strings to None
-        normalized = {}
-        for key in empty:
-            val = result.get(key)
-            normalized[key] = val if val else None
-        return normalized
-    except Exception as exc:  # noqa: BLE001
-        print(f'  [LLM] Analysis failed ({exc!r}) — posting hard-coded sections only.')
-        return empty
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -473,138 +312,41 @@ def request_copilot_review(repo: str, pr_number: int, dry_run: bool) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Comment assembly
-# ---------------------------------------------------------------------------
-
-
-def build_comment(
-    repo: str,
-    pr: dict,
-    first_timer: bool,
-    is_design: bool,
-    visual_evidence: bool,
-    ci_failing: bool,
-    llm_concerns: dict,
-    copilot_assigned: bool = True,
-) -> str:
-    parts: list[str] = []
-    pr_body = pr.get('body') or ''
-
-    # --- First-timer welcome ---
-    if first_timer:
-        parts.append(':tada: Thank you for making your first contribution to Open Library!\n')
-
-        assignees = pr.get('assignees', [])
-        if assignees:
-            handle = assignees[0]['login']
-            # Try to find the linked issue for priority context
-            m = ISSUE_REF_RE.search(pr_body)
-            issue_number = m.group(1) if m else None
-            priority = get_issue_priority(repo, issue_number) if issue_number else None
-            if priority is not None:
-                count = get_assignee_issue_count(repo, handle, priority)
-                parts.append(
-                    f'This PR is assigned to @{handle} and they currently have '
-                    f'**{count}** open issue(s) with equal or higher priority to review. '
-                    f'Please be patient — it may take several days for maintainers to reply.'
-                )
-            else:
-                parts.append(
-                    f'This PR is assigned to @{handle}. '
-                    f'Please be patient — it may take several days for maintainers to reply.'
-                )
-        else:
-            parts.append(
-                'On Mondays and Fridays, maintainers try to meet and set assignees, '
-                "so please hold tight until we're able to triage."
-            )
-
-        if copilot_assigned:
-            parts.append(
-                '\n🤖 In the meantime, we are assigning Copilot to offer an initial '
-                'code review and feedback.'
-            )
-        else:
-            parts.append(
-                '\n🤖 We attempted to assign Copilot for an automated code review but '
-                'were unable to at this time. A maintainer will follow up.'
-            )
-
-    # --- LLM-generated concerns ---
-    emoji_map = {
-        'quality_concern': '🚦',
-        'template_concern': '🚦',
-        'test_concern': '🧪',
-        'git_concern': '⚠️',
-    }
-    for key, emoji in emoji_map.items():
-        text = llm_concerns.get(key)
-        if text:
-            parts.append(f'{emoji} {text}')
-
-    # --- Design PR without visual evidence (hard-coded fallback) ---
-    # Only add if LLM didn't already flag a template concern
-    if is_design and not visual_evidence and not llm_concerns.get('template_concern'):
-        parts.append(
-            f'📸 It really helps maintainers provide code reviews when PRs that touch '
-            f'the UI include screenshots or a short video. You can drag a video or image '
-            f'directly into this comment box. '
-            f'[Here]({SCREENSHOT_GUIDE_URL}) are instructions for capturing a recording.'
-        )
-
-    # --- CI failing (hard-coded, always shown) ---
-    if ci_failing:
-        parts.append(
-            f'⛔ It looks like some CI checks are failing — please check the **Checks** '
-            f'tab for errors. Running our '
-            f'[pre-commit hooks]({PRECOMMIT_GUIDE_URL}) locally before pushing can catch '
-            f'most issues early.'
-        )
-
-    if not parts:
-        return ''
-
-    parts.append(
-        '\nIf you have any questions about anything above, please reply here and '
-        "we'll be happy to help!"
-    )
-    parts.append(BOT_MARKER)
-    return '\n\n'.join(parts)
-
-
-# ---------------------------------------------------------------------------
 # Per-PR processing
 # ---------------------------------------------------------------------------
 
 
-def process_pr(repo: str, pr: dict, dry_run: bool) -> None:
+def process_pr(repo: str, pr: dict, dry_run: bool) -> dict | None:
+    """
+    Check eligibility, assign Copilot, gather signals.
+    Returns a data dict for the Claude Code agent, or None if the PR is skipped.
+    All skip/status messages go to stderr to keep stdout clean for JSON.
+    """
     pr_number = pr['number']
     author = pr.get('author', {}).get('login', 'unknown')
-    print(f'\nPR #{pr_number}: "{pr.get("title", "")}" by @{author}')
+    print(f'PR #{pr_number}: "{pr.get("title", "")}" by @{author}', file=sys.stderr)
 
-    # Skip if Copilot already assigned (staff PR or already processed)
     if copilot_already_assigned(repo, pr_number):
-        print('  Copilot already assigned — skipping (staff PR or already processed).')
-        return
+        print('  Copilot already assigned — skipping.', file=sys.stderr)
+        return None
     time.sleep(0.5)
 
-    # Single fetch for both comment checks (avoids duplicate API call)
     has_comments, has_marker = check_comments(repo, pr_number)
     if has_comments:
-        print('  Already has comments — skipping.')
-        return
+        print('  Already has comments — skipping.', file=sys.stderr)
+        return None
     if has_marker:
-        print('  Bot marker found — skipping.')
-        return
+        print('  Bot marker found — skipping.', file=sys.stderr)
+        return None
     time.sleep(0.5)
 
-    # 1. Assign Copilot (may fail if credit limit hit or handle is wrong)
+    # Assign Copilot
     copilot_assigned = request_copilot_review(repo, pr_number, dry_run)
     if not copilot_assigned:
-        print('  Copilot assignment failed — will note in comment and continue.')
+        print('  Copilot assignment failed — will include in output.', file=sys.stderr)
     time.sleep(1)
 
-    # 2. Gather hard-coded signals
+    # Gather signals
     pr_body = pr.get('body') or ''
     first_timer = is_first_contribution(repo, author)
     time.sleep(0.5)
@@ -615,48 +357,54 @@ def process_pr(repo: str, pr: dict, dry_run: bool) -> None:
     ci_fail = is_ci_failing(repo, pr_number)
     time.sleep(0.5)
 
-    signals = {
-        'has_linked_issue': has_ref,
-        'is_first_contribution': first_timer,
-        'ci_failing': ci_fail,
-        'is_design_pr': is_design,
-        'has_visual_evidence': visual,
-    }
+    # Linked issue + assignee workload
+    m = ISSUE_REF_RE.search(pr_body)
+    linked_issue_number = m.group(1) if m else None
+    linked_issue_priority = None
+    assignee_issue_count = None
+    if linked_issue_number:
+        linked_issue_priority = get_issue_priority(repo, linked_issue_number)
+        time.sleep(0.5)
+    assignees = pr.get('assignees', [])
+    if assignees and linked_issue_priority is not None:
+        assignee_issue_count = get_assignee_issue_count(
+            repo, assignees[0]['login'], linked_issue_priority
+        )
+        time.sleep(0.5)
+
+    # Rich PR data for Claude's analysis
+    files_changed, test_files = get_pr_files(repo, pr_number)
+    time.sleep(0.5)
+    commit_messages = get_commit_messages(repo, pr_number)
+
     print(
         f'  Signals: first_timer={first_timer} has_issue_ref={has_ref} '
-        f'design={is_design} visual={visual} ci_failing={ci_fail}'
+        f'design={is_design} visual={visual} ci_failing={ci_fail}',
+        file=sys.stderr,
     )
 
-    # 3. LLM analysis
-    print('  Running LLM analysis...')
-    llm_concerns = analyze_pr_with_llm(repo, pr, signals)
-    flagged = [k for k, v in llm_concerns.items() if v]
-    print(f'  LLM flagged: {flagged or "nothing"}')
-
-    # 4. Assemble comment
-    comment = build_comment(
-        repo=repo,
-        pr=pr,
-        first_timer=first_timer,
-        is_design=is_design,
-        visual_evidence=visual,
-        ci_failing=ci_fail,
-        llm_concerns=llm_concerns,
-        copilot_assigned=copilot_assigned,
-    )
-
-    if not comment:
-        print('  Nothing to say — no comment posted.')
-        return
-
-    if dry_run:
-        print(f'  [DRY RUN] Would post comment:\n{"─"*60}\n{comment}\n{"─"*60}')
-    else:
-        result = _run_gh(['pr', 'comment', str(pr_number), '--repo', repo, '--body', comment])
-        if result.returncode == 0:
-            print(f'  Posted comment on PR #{pr_number}.')
-        else:
-            print(f'  Failed to post comment: {result.stderr.strip()}', file=sys.stderr)
+    return {
+        'number': pr_number,
+        'title': pr.get('title', ''),
+        'url': pr.get('url', ''),
+        'author': author,
+        'body': pr_body[:3000],
+        'labels': [lb.get('name', '') for lb in pr.get('labels', [])],
+        'assignees': [{'login': a['login']} for a in assignees],
+        'first_contribution': first_timer,
+        'has_issue_reference': has_ref,
+        'linked_issue_number': linked_issue_number,
+        'linked_issue_priority': linked_issue_priority,
+        'assignee_issue_count': assignee_issue_count,
+        'is_design_pr': is_design,
+        'has_visual_evidence': visual,
+        'ci_failing': ci_fail,
+        'copilot_assigned': copilot_assigned,
+        'files_changed': files_changed,
+        'test_files': test_files,
+        'commit_messages': commit_messages,
+        'dry_run': dry_run,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -675,8 +423,8 @@ def _get_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         '--dry-run', action='store_true',
-        help='Print all planned actions without writing anything to GitHub. '
-             'Still calls the LLM for realistic output.',
+        help='Skip Copilot assignment; set dry_run=true in JSON so the '
+             'Claude Code agent prints rather than posts.',
     )
     parser.add_argument(
         '--repo', default=DEFAULT_REPO,
@@ -688,27 +436,30 @@ def _get_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = _get_parser().parse_args()
 
-    if args.dry_run:
-        print('[DRY RUN — no GitHub writes will occur]\n')
-
-    print(f'Fetching non-draft PRs opened in the last {args.hours}h on {args.repo}...')
+    print(
+        f'Fetching non-draft PRs opened in the last {args.hours}h on {args.repo}...',
+        file=sys.stderr,
+    )
     try:
         prs = get_recent_prs(args.repo, args.hours)
     except GHError as exc:
         print(f'Failed to fetch PRs: {exc}', file=sys.stderr)
         sys.exit(1)
 
-    print(f'Found {len(prs)} candidate PR(s).')
-    if not prs:
-        sys.exit(0)
+    print(f'Found {len(prs)} candidate PR(s).', file=sys.stderr)
 
+    results = []
     for pr in prs:
         try:
-            process_pr(args.repo, pr, dry_run=args.dry_run)
+            data = process_pr(args.repo, pr, dry_run=args.dry_run)
+            if data:
+                results.append(data)
         except GHError as exc:
             print(f'  GH error on PR #{pr.get("number")}: {exc}', file=sys.stderr)
         except Exception as exc:  # noqa: BLE001
             print(f'  Unexpected error on PR #{pr.get("number")}: {exc}', file=sys.stderr)
+
+    print(json.dumps(results, indent=2))
 
 
 if __name__ == '__main__':
