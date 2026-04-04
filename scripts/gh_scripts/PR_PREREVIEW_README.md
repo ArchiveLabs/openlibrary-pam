@@ -130,10 +130,6 @@ This is a heuristic, not a rule. The reasoning: staff members know the project w
 
 Two practical reasons: mek's account holds the Copilot credits that make the reviewer assignment possible, and it has the GitHub permissions required to add Copilot as a reviewer on PRs in this org. Beyond the technical requirement, using a personal account means accountability is clear — if a contributor replies or needs follow-up, the thread lands with the maintainer who can actually act on it.
 
-### Why `claude-opus-4-6`?
-
-Tone judgment and nuanced mentorship require the most capable model. The cost per PR is low (a few cents at most) and the quality difference versus Sonnet is noticeable for the kind of "read between the lines" analysis we want. If costs become a concern, switch to Sonnet in the `LLM_MODEL` constant.
-
 ---
 
 ## Tuning guide
