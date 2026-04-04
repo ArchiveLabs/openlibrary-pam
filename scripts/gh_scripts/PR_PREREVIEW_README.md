@@ -50,8 +50,9 @@ These are cheap binary checks done via `gh` API calls before the LLM is invoked:
 | Signal | Method | Used for |
 |---|---|---|
 | First-time contributor | Count all PRs by this author (`--state all`) == 1 | Decide whether to show the welcome + triage block |
-| Issue reference | Regex `#\d+` anywhere in PR body | Tell LLM; used as context for quality concern |
-| CI status | GitHub check-runs API on head commit SHA | Hard-coded ⛔ section |
+| Issue reference | Regex `#\d+` anywhere in PR body | Passed to LLM as `has_linked_issue`; informs quality concern judgment |
+| Open issue check | Verify the referenced issue is actually open via API | Passed to LLM — a closed or missing issue may indicate a misdirected PR |
+| CI status | GitHub check-runs API on head commit SHA; treats `failure`, `timed_out`, `cancelled`, `action_required` as failing | Hard-coded ⛔ section |
 | Design PR | Label contains "design" OR files touch `static/css/` | Hard-coded 📸 section |
 | Visual evidence | Regex for markdown images, video URLs, GitHub CDN | Suppresses 📸 section if present |
 
@@ -79,7 +80,7 @@ Claude returns a JSON object with four nullable fields:
 
 Each non-null value is a 2–4 sentence markdown string ready to paste directly into the comment. Claude is instructed to return `null` unless a concern is clearly warranted — erring toward silence over noise.
 
-If `ANTHROPIC_API_KEY` is not set or the `anthropic` package is not installed, the LLM step is silently skipped and only the hard-coded sections appear.
+If `ANTHROPIC_API_KEY` is not set or the `anthropic` package is not installed, the LLM step is skipped (a `[LLM] ... skipping LLM analysis.` message is printed to stdout) and only the hard-coded sections appear.
 
 ### 4. Assemble and post the comment
 
@@ -195,6 +196,20 @@ Make sure `ANTHROPIC_API_KEY` is available in the environment where the schedule
 ```cron
 0 * * * * cd /path/to/openlibrary && ANTHROPIC_API_KEY=sk-... python3 scripts/gh_scripts/new_pr_bot.py >> /tmp/pr_bot.log 2>&1
 ```
+
+---
+
+## Canonical resource URLs
+
+These URLs are the authoritative links cited in bot comments and injected into the LLM system prompt. They are defined as named constants at the top of `new_pr_bot.py` so both the script and any AI agent reading this file have a single place to update them.
+
+| Constant | URL | Purpose |
+|---|---|---|
+| `GIT_CHEATSHEET_URL` | https://github.com/internetarchive/openlibrary/wiki/git | Linked when flagging messy commit history |
+| `PR_TEMPLATE_URL` | https://github.com/internetarchive/openlibrary/blob/master/.github/pull_request_template.md | Linked for template compliance concerns |
+| `PRECOMMIT_GUIDE_URL` | https://docs.openlibrary.org/developers/tools/pre-commit.html | Linked in CI-failing section |
+| `SCREENSHOT_GUIDE_URL` | https://github.com/internetarchive/openlibrary/wiki/Testing-&-Tools#screenshots | Linked in missing-screenshot section |
+| `CONTRIBUTING_URL` | https://github.com/internetarchive/openlibrary/blob/master/CONTRIBUTING.md | Referenced in quality concern guidance |
 
 ---
 

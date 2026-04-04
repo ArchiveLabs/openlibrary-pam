@@ -65,22 +65,38 @@ VISUAL_EVIDENCE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Resource URLs referenced in comments
+# Resource URLs used in comments and injected into the LLM system prompt so
+# Claude can cite them directly. Keep these up-to-date as the canonical
+# reference list for AI agents reading this file.
 GIT_CHEATSHEET_URL = 'https://github.com/internetarchive/openlibrary/wiki/git'
-PRECOMMIT_GUIDE_URL = 'https://docs.openlibrary.org/developers/tools/pre-commit.html'
 PR_TEMPLATE_URL = (
     'https://github.com/internetarchive/openlibrary/blob/master/'
     '.github/pull_request_template.md'
 )
+PRECOMMIT_GUIDE_URL = 'https://docs.openlibrary.org/developers/tools/pre-commit.html'
 SCREENSHOT_GUIDE_URL = (
     'https://github.com/internetarchive/openlibrary/wiki/Testing-&-Tools#screenshots'
 )
+CONTRIBUTING_URL = (
+    'https://github.com/internetarchive/openlibrary/blob/master/CONTRIBUTING.md'
+)
+
+# Known Copilot reviewer logins — exact match to avoid false positives
+_COPILOT_LOGINS = frozenset({'copilot', 'github-copilot[bot]'})
+
+# CI check conclusions that should be treated as "failing"
+_CI_FAILING_CONCLUSIONS = frozenset({'failure', 'timed_out', 'cancelled', 'action_required'})
+
+# Priority labels go from 0 (highest) to MAX_PRIORITY (lowest); cap to avoid runaway API loops
+_MAX_PRIORITY = 2
 
 # ---------------------------------------------------------------------------
 # System prompt for LLM analysis
 # ---------------------------------------------------------------------------
 
-LLM_SYSTEM_PROMPT = """\
+def _build_system_prompt() -> str:
+    """Build the LLM system prompt, injecting canonical resource URLs."""
+    return f"""\
 You are a warm, experienced open-source mentor reviewing a new pull request for \
 the Open Library project (https://openlibrary.org), a non-profit digital library \
 run by the Internet Archive. Contributors range from first-timers to seasoned \
@@ -91,12 +107,12 @@ Your job is to flag genuine concerns that would make this PR hard to review or \
 merge. You will receive a JSON object describing the PR. Return a JSON object \
 with exactly these four fields (each is either null or a short markdown string):
 
-{
+{{
   "quality_concern": null,
   "test_concern": null,
   "git_concern": null,
   "template_concern": null
-}
+}}
 
 Guidelines for each field:
 
@@ -109,7 +125,7 @@ quality_concern
   - Clear bug fixes, even small ones
   - PRs that reference an issue (has_linked_issue=true)
   When in doubt, leave null. Reviewers can ask; we don't want to discourage
-  legitimate contributions.
+  legitimate contributions. See: {CONTRIBUTING_URL}
 
 test_concern
   Set to a message if the changed code paths clearly lack any tests AND the
@@ -123,15 +139,14 @@ git_concern
   upstream merge commits ("Merge branch 'master'"), dozens of "fix", "wip",
   "update" commits suggesting iterative trial-and-error without cleanup. When
   flagging, name the specific pattern you saw and suggest one concrete technique
-  (e.g. interactive rebase, squash). Link to our git cheatsheet:
-  https://github.com/internetarchive/openlibrary/wiki/git
+  (e.g. interactive rebase, squash). Link to: {GIT_CHEATSHEET_URL}
 
 template_concern
   Set to a message ONLY if a required template section is obviously empty or
   missing AND it matters for reviewability — specifically: the Testing section
   (how to verify the fix) or the Screenshot section for UI changes. Don't flag
   minor template gaps; prioritize the ones that block reviewers from doing their
-  job.
+  job. The PR template is at: {PR_TEMPLATE_URL}
 
 Style rules:
 - 2–4 sentences max per field. Be specific (mention actual file names, commit
@@ -140,6 +155,9 @@ Style rules:
 - End each message with a link to a relevant resource when one exists.
 - Return ONLY valid JSON. No prose outside the JSON object.
 """
+
+
+LLM_SYSTEM_PROMPT = _build_system_prompt()
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +174,11 @@ class GHError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def _run_gh(args: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(['gh'] + args, capture_output=True, text=True)
+def _run_gh(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(['gh'] + args, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise GHError(f"gh {' '.join(args[:4])}... timed out after {timeout}s")
 
 
 def gh_json(args: list[str]) -> object:
@@ -215,13 +236,18 @@ def get_recent_prs(repo: str, hours: float) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def has_any_comment(repo: str, pr_number: int) -> bool:
-    """Return True if the PR has any issue-thread comments (not the PR body)."""
+def check_comments(repo: str, pr_number: int) -> tuple[bool, bool]:
+    """
+    Fetch PR comments once and return (has_any_comment, has_bot_marker).
+    On API error, returns (True, False) — fail closed to avoid double-posting.
+    """
     try:
         comments = gh_json(['api', f'repos/{repo}/issues/{pr_number}/comments'])
-        return bool(comments)
+        has_any = bool(comments)
+        has_marker = any(BOT_MARKER in (c.get('body') or '') for c in comments)
+        return has_any, has_marker
     except GHError:
-        return False
+        return True, False
 
 
 def copilot_already_assigned(repo: str, pr_number: int) -> bool:
@@ -229,25 +255,16 @@ def copilot_already_assigned(repo: str, pr_number: int) -> bool:
     try:
         requested = gh_json(['api', f'repos/{repo}/pulls/{pr_number}/requested_reviewers'])
         for user in requested.get('users', []):
-            if 'copilot' in user.get('login', '').lower():
+            if user.get('login', '').lower() in _COPILOT_LOGINS:
                 return True
         reviews = gh_json(['api', f'repos/{repo}/pulls/{pr_number}/reviews'])
         for review in reviews:
-            login = (review.get('user') or {}).get('login', '')
-            if 'copilot' in login.lower():
+            login = (review.get('user') or {}).get('login', '').lower()
+            if login in _COPILOT_LOGINS:
                 return True
     except GHError:
         pass
     return False
-
-
-def has_bot_comment(repo: str, pr_number: int) -> bool:
-    """Secondary idempotency guard: check for our HTML marker."""
-    try:
-        comments = gh_json(['api', f'repos/{repo}/issues/{pr_number}/comments'])
-        return any(BOT_MARKER in (c.get('body') or '') for c in comments)
-    except GHError:
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +311,7 @@ def is_ci_failing(repo: str, pr_number: int) -> bool:
         pr_data = gh_json(['api', f'repos/{repo}/pulls/{pr_number}'])
         sha = pr_data['head']['sha']
         data = gh_json(['api', f'repos/{repo}/commits/{sha}/check-runs'])
-        return any(c.get('conclusion') == 'failure' for c in data.get('check_runs', []))
+        return any(c.get('conclusion') in _CI_FAILING_CONCLUSIONS for c in data.get('check_runs', []))
     except GHError:
         pass
     # Fallback to gh pr checks text output
@@ -316,7 +333,7 @@ def get_issue_priority(repo: str, issue_number: str) -> int | None:
 
 def get_assignee_issue_count(repo: str, assignee: str, max_priority: int) -> int:
     total = 0
-    for p in range(max_priority + 1):
+    for p in range(min(max_priority, _MAX_PRIORITY) + 1):
         try:
             issues = gh_json([
                 'issue', 'list', '--repo', repo,
@@ -422,7 +439,9 @@ def analyze_pr_with_llm(
                 }
             ],
         )
-        raw = response.content[0].text.strip()
+        raw = ''.join(
+            block.text for block in response.content if hasattr(block, 'text')
+        ).strip()
         # Strip markdown code fences if present
         if raw.startswith('```'):
             raw = re.sub(r'^```(?:json)?\s*', '', raw)
@@ -462,7 +481,6 @@ def build_comment(
     repo: str,
     pr: dict,
     first_timer: bool,
-    has_issue_ref: bool,
     is_design: bool,
     visual_evidence: bool,
     ci_failing: bool,
@@ -570,16 +588,15 @@ def process_pr(repo: str, pr: dict, dry_run: bool) -> None:
         return
     time.sleep(0.5)
 
-    # Skip if any comments exist (already had human/bot attention)
-    if has_any_comment(repo, pr_number):
+    # Single fetch for both comment checks (avoids duplicate API call)
+    has_comments, has_marker = check_comments(repo, pr_number)
+    if has_comments:
         print('  Already has comments — skipping.')
         return
-    time.sleep(0.5)
-
-    # Belt-and-suspenders: skip if our marker is present
-    if has_bot_comment(repo, pr_number):
+    if has_marker:
         print('  Bot marker found — skipping.')
         return
+    time.sleep(0.5)
 
     # 1. Assign Copilot (may fail if credit limit hit or handle is wrong)
     copilot_assigned = request_copilot_review(repo, pr_number, dry_run)
@@ -621,7 +638,6 @@ def process_pr(repo: str, pr: dict, dry_run: bool) -> None:
         repo=repo,
         pr=pr,
         first_timer=first_timer,
-        has_issue_ref=has_ref,
         is_design=is_design,
         visual_evidence=visual,
         ci_failing=ci_fail,
