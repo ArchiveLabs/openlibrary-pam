@@ -128,7 +128,7 @@ This is a heuristic, not a rule. The reasoning: staff members know the project w
 
 ### Why use the personal `mek` account instead of a bot account?
 
-Comments appear more personal and trustworthy coming from a real human account. The downside is that mek's GitHub notifications will include replies to these automated comments. If that becomes noisy, the right solution is to create a dedicated account and authenticate `gh` with that account's token.
+Two practical reasons: mek's account holds the Copilot credits that make the reviewer assignment possible, and it has the GitHub permissions required to add Copilot as a reviewer on PRs in this org. Beyond the technical requirement, using a personal account means accountability is clear — if a contributor replies or needs follow-up, the thread lands with the maintainer who can actually act on it.
 
 ### Why `claude-opus-4-6`?
 
