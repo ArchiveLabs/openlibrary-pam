@@ -460,11 +460,13 @@ def process_pr(repo: str, pr: dict, dry_run: bool) -> dict | None:
             repo, assignees[0]['login'], linked_issue_priority
         )
         time.sleep(0.5)
-    # Always compute queue count; pass None if untriaged (counts all open non-draft PRs)
-    pr_queue_count = get_pr_queue_count(repo, linked_issue_priority)
-    time.sleep(0.5)
     # PR assignee takes precedence over issue assignee for workload count
     pr_assignee_login = assignees[0]['login'] if assignees else linked_issue_assignee
+    if not pr_assignee_login:
+        # Only compute queue count when there is no assignee; pass None if
+        # untriaged (counts all open non-draft PRs).
+        pr_queue_count = get_pr_queue_count(repo, linked_issue_priority)
+        time.sleep(0.5)
     assignee_pr_count = None
     if pr_assignee_login:
         assignee_pr_count = get_assignee_pr_count(repo, pr_assignee_login, linked_issue_priority)
