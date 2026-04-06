@@ -40,11 +40,11 @@ The system has two components that work together each hour:
 **Part 1 — `new_pr_bot.py` (data gatherer, runs first)**
 
 For each eligible PR the script:
-1. Assigns Copilot as reviewer (`gh pr edit {number} --add-reviewer copilot`)
+1. Assigns Copilot as reviewer (via REST API: `gh api repos/{repo}/pulls/{number}/requested_reviewers --method POST --field 'reviewers[]=copilot-pull-request-reviewer[bot]'`)
 2. Gathers signals via `gh` API calls
 3. Prints a JSON array to stdout — one object per eligible PR
 
-> **Note:** If the `copilot` reviewer identifier ever stops working, update the string `'copilot'` in `request_copilot_review()` and the `_COPILOT_LOGINS` set.
+> **Note:** If the Copilot assignment stops working, the slug to check is `copilot-pull-request-reviewer[bot]` in `request_copilot_review()`. Test with: `gh api repos/internetarchive/openlibrary/pulls/{PR}/requested_reviewers --method POST --field 'reviewers[]=copilot-pull-request-reviewer[bot]'`
 
 Signals gathered per PR:
 
@@ -54,8 +54,15 @@ Signals gathered per PR:
 | `has_issue_reference` | Regex `#\d+` anywhere in PR body |
 | `linked_issue_number` | First `#NNN` match in body |
 | `linked_issue_priority` | Priority label on linked issue (`Priority: 0/1/2`) |
+| `linked_issue_triaged` | True if linked issue has a `Priority: *` label |
+| `linked_issue_assigned` | True if linked issue has at least one assignee |
+| `linked_issue_triaged` | True if linked issue has a `Priority: *` label |
+| `linked_issue_assigned` | True if linked issue has at least one assignee |
+| `pr_assignee_login` | PR assignee login if set, else linked issue assignee login (the effective reviewer) |
+| `assignee_pr_count` | Open non-draft PRs assigned to `pr_assignee_login` at equal/higher priority |
+| `pr_queue_count` | Open non-draft PRs at equal/higher priority (only surfaced when there is no `pr_assignee_login`) |
 | `assignee_issue_count` | Open issues for the assignee at equal/higher priority |
-| `ci_failing` | check-runs API; treats `failure`, `timed_out`, `cancelled`, `action_required` as failing |
+| `ci_failing` | check-runs API; treats `failure`, `timed_out`, `action_required` as failing |
 | `is_design_pr` | Label contains "design" OR files touch `static/css/` |
 | `has_visual_evidence` | Regex for markdown images, video URLs, GitHub CDN in body |
 | `files_changed` | List of `{path, additions, deletions}` |
@@ -68,60 +75,125 @@ Signals gathered per PR:
 
 The agent is invoked with the prompt in the **Scheduling** section below. It reads the JSON output, uses this README as its guide, and posts a comment on each PR via `gh pr comment`. If `dry_run` is true, it prints what it would post instead.
 
-### Comment structure Claude should follow
+### Comment structure
 
-```
-:tada:  First-timer welcome                         (if first_contribution)
-        Assignee workload OR Mon/Fri triage msg      (if first_contribution)
-🤖      Copilot review mention                       (if first_contribution)
-
-⚠️     Missing issue reference                      (see guidance below)
-📝     PR description / template concerns            (see guidance below)
-🔀     Messy commit history                          (see guidance below)
-🧪     No testing evidence                           (see guidance below)
-
-📸      No screenshot                                (if is_design_pr and not has_visual_evidence)
-⛔      CI failing                                   (additive only — see guidance below)
-
-        Footer + <!-- ol-pr-bot --> marker
-```
-
-**General rule: when in doubt, say nothing.** A false positive (nagging a contributor who did nothing wrong) is worse than a false negative. Each concern below has a clear threshold — only fire it when that threshold is clearly met.
-
-If nothing warrants a comment, post nothing.
+Every eligible PR gets a comment. The comment has three parts:
 
 ---
 
-### Quality concern guidance
+**Part 1 — Body (always present)**
 
-#### ⚠️ Missing issue reference
-- **Fire when**: `has_issue_reference` is false AND the PR is clearly implementing a feature or fixing a bug that should have a tracked issue (i.e. it's not a self-evident typo fix, pure docs update, or trivial config change).
-- **Don't fire when**: the PR title/description makes the change fully self-explanatory and an issue would be redundant.
-- **Say**: Briefly mention that PRs should reference the issue they address, and link to `CONTRIBUTING_URL`.
+Warm acknowledgment + project management context. Structure in this order:
+1. Thank you line (+ first-timer welcome if `first_contribution` is true)
+2. **Reviewer expectations immediately after** — use the following logic to tell the contributor when and by whom their PR will be reviewed. Write this as separate paragraphs, not a wall of text.
 
-#### 📝 PR description / template concerns
-- **Fire when**: the PR body is very short (under ~100 characters), is a near-empty template skeleton (sections are present but not filled in), or omits what the change does and how to verify it.
-- **Don't fire when**: the title and a short description together make the PR completely clear.
-- **Say**: Note the specific missing section(s), link to `PR_TEMPLATE_URL`.
+   First sentence (always): Copilot has been assigned for an initial review.
 
-#### 🔀 Messy commit history
-- **Fire when**: `commit_messages` contains obvious WIP noise — messages like "WIP", "fix", "update", "temp", "fixup!", "asdf", or >5 commits for a change that reads as one logical unit.
-- **Don't fire when**: commits tell a clean story even if there are several, or the PR has just one or two commits regardless of phrasing.
-- **Say**: Suggest squashing or tidying up before review, link to `GIT_CHEATSHEET_URL`.
+   Second paragraph — use exactly one of these branches based on the data:
 
-#### 🧪 No testing evidence
-- **Fire when**: the PR touches substantive logic (>10 meaningful lines changed in non-trivial files), `test_files` is empty, and `has_visual_evidence` is false — i.e. there is no indication the change was tested.
-- **Don't fire when**: the PR is a pure refactor/rename, the change is so small that a test would be trivial, or the contributor already describes how they tested it in the body.
-- **Say**: Ask for a brief description of how this was tested, or a screenshot/test case demonstrating the behaviour.
+   - **If `pr_assignee_login` is set** (there is an effective reviewer):
+     - If `linked_issue_triaged` is false or null: start with "The linked issue hasn't been triaged yet — triage happens on Mondays and Fridays."
+     - Then on a new line: "@{pr_assignee_login} is assigned to this PR and currently has:" followed by a bullet:
+       - `* {assignee_pr_count} open PR(s) of equal or higher priority to review first`
 
-#### 📸 No screenshot (design PRs only)
-- **Fire when**: `is_design_pr` is true and `has_visual_evidence` is false.
-- **Say**: Ask for a before/after screenshot or screen recording, link to `SCREENSHOT_GUIDE_URL`.
+   - **If `pr_assignee_login` is not set** (no effective reviewer):
+     - If `linked_issue_triaged` is false or null: "The linked issue hasn't been triaged yet — triage happens on Mondays and Fridays. There are currently {pr_queue_count} open non-draft PRs ahead of yours."
+     - If triaged but no assignee: "A reviewer must first be assigned. There are currently {pr_queue_count} open PRs of equal or higher priority ahead of yours."
 
-#### ⛔ CI failing — additive only
-- **Fire when**: `ci_failing` is true AND the comment already has at least one other section.
-- **Never** post a comment whose only content is the CI block.
-- **Say**: Note that CI is currently failing and link to `PRECOMMIT_GUIDE_URL` for common fixes. Reference the specific check name if you can infer it from the context.
+   **Key rule**: `pr_queue_count` is only ever mentioned when `pr_assignee_login` is null/empty. When an assignee exists, use `assignee_pr_count` instead.
+
+---
+
+**Part 2 — Submitter action items (only if checklist items fail)**
+
+If any of the checklist items below require action from the contributor, surface them here as `- [ ]` items before the collapsed checklist. Apply the `Needs: Submitter Input` label to the PR.
+
+Example items that belong here:
+- **PR description is empty or a near-empty template skeleton** — always surface this. If the body is just unfilled headings, say so explicitly and link to `PR_TEMPLATE_URL`. Do not let this slide even for small changes.
+- No issue reference (for non-trivial changes)
+- Messy commit history (WIP messages, merge conflicts in history)
+- CI is failing
+- No proof of testing for a substantive change
+
+**General rule: when in doubt, say nothing.** A false positive is worse than a false negative. Only surface items you are confident about.
+
+---
+
+**Part 3 — Triage checklist (always present, collapsed)**
+
+```markdown
+<details>
+<summary>PR triage checklist (maintainers / Pam)</summary>
+
+- [ ] **PR description** — not empty; explains what the change does and how to verify it
+- [ ] **References an issue** — PR body contains a `#NNN` reference
+  - [ ] **Linked issue is triaged** — has a `Priority: *` label (not just `Needs: Triage`)
+  - [ ] **Linked issue is assigned** — has at least one assignee
+- [ ] **Commit history clean** — no WIP/fixup/conflict noise; commit messages are meaningful
+- [ ] **CI passing** — no failing check-runs
+- [ ] **Test cases present** — if the change touches substantive logic, test coverage exists or is explained
+- [ ] **Proof of testing** — PR body includes a description of what was tested, a screenshot, or a video
+
+</details>
+```
+
+Use `[x]` where the criterion is met, `[ ]` where it is not. Every item must be `- [ ]` or `- [x]`.
+
+---
+
+**Footer** — end every comment with the Pam attribution note followed by `<!-- ol-pr-bot -->`:
+
+```markdown
+> [!NOTE]
+> This comment was automatically generated by [Pam](https://github.com/ArchiveLabs/openlibrary-pam), Open Library's Project AI Manager, on behalf of @mekarpeles. Pam is designed to provide status visibility, perform basic project management functions and relevant codebase research, and provide actionable feedback so contributors aren't left waiting.
+```
+
+---
+
+### Checklist guidance
+
+#### PR description
+- **Fail when**: `body` is empty, under ~100 characters, or is a near-empty template skeleton (headings present but nothing filled in).
+- **Pass when**: title + body together make the change and its purpose clear.
+- **When failing**: fetch the linked issue and the PR diff, then surface it as a submitter action item with a generated draft. Use the framing "For future PRs, please follow the PR template" — not "before this PR can be reviewed" — since this is guidance for next time, not a hard gate.
+
+```bash
+gh pr diff {number} --repo internetarchive/openlibrary
+gh issue view {linked_issue_number} --repo internetarchive/openlibrary --json title,body
+```
+
+Format:
+> For future PRs, please follow the [PR template]({PR_TEMPLATE_URL}) and provide a description. Here's a draft based on the diff and linked issue:
+>
+> > *[2–4 sentence summary of what the diff does and why, written in the contributor's voice. Reference the issue. Do not invent details not present in the diff or issue.]*
+
+#### Issue reference
+- **Fail when**: `has_issue_reference` is false AND the change is non-trivial (not a typo fix, pure docs update, or trivial config change).
+- **Pass when**: the PR title/description is fully self-explanatory without an issue, or an issue reference is present.
+
+#### Linked issue triaged / assigned
+- Only evaluate if `linked_issue_number` is set.
+- `linked_issue_triaged`: true if `linked_issue_triaged` is true in the JSON.
+- `linked_issue_assigned`: true if `linked_issue_assigned` is true in the JSON.
+- If the issue is not triaged, mention this kindly in the body — don't treat it as a hard blocker on the PR itself.
+
+#### Commit history
+- **Fail when**: `commit_messages` contains obvious noise — "WIP", "fix", "temp", "fixup!", "asdf", merge conflict markers, or >5 commits for what reads as one logical change.
+- **Pass when**: commits tell a coherent story, or there are 1–2 commits regardless of phrasing.
+- **Say**: suggest squashing or tidying, link to `GIT_CHEATSHEET_URL`.
+
+#### CI passing
+- **Fail when**: `ci_failing` is true.
+- **Say**: note CI is failing, link to `PRECOMMIT_GUIDE_URL`.
+
+#### Test cases
+- **Fail when**: the PR touches substantive logic (>10 meaningful lines in non-trivial files) and `test_files` is empty.
+- **Pass when**: the PR is a pure refactor/rename, a trivial change, or the contributor describes tests in the body.
+
+#### Proof of testing
+- **Fail when**: `has_visual_evidence` is false AND the PR body contains no description of how the change was tested.
+- **Pass when**: body includes a test description, screenshot, or video.
+- **Say**: ask for a brief description of what was tested, or a screenshot/video — link to `GITHUB_ATTACH_GUIDE_URL` for how to attach files to a GitHub comment.
 
 ---
 
@@ -220,12 +292,13 @@ These URLs are cited in bot comments by the Claude Code agent. They are defined 
 | `PRECOMMIT_GUIDE_URL` | https://docs.openlibrary.org/developers/tools/pre-commit.html | Linked in CI-failing section |
 | `SCREENSHOT_GUIDE_URL` | https://github.com/internetarchive/openlibrary/wiki/Testing-&-Tools#screenshots | Linked in missing-screenshot section |
 | `CONTRIBUTING_URL` | https://github.com/internetarchive/openlibrary/blob/master/CONTRIBUTING.md | Referenced in quality concern guidance |
+| `GITHUB_ATTACH_GUIDE_URL` | https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/attaching-files | Linked when asking for proof of testing |
 
 ---
 
 ## Known limitations and future ideas
 
-- **Copilot reviewer handle**: The string `'copilot'` may need updating if GitHub changes the app's login. Test with `gh pr edit <PR> --add-reviewer copilot` manually if reviews stop being requested.
+- **Copilot reviewer handle**: The bot slug `copilot-pull-request-reviewer[bot]` may change if GitHub renames the app. Test with `gh api repos/internetarchive/openlibrary/pulls/{PR}/requested_reviewers --method POST --field 'reviewers[]=copilot-pull-request-reviewer[bot]'` if assignments stop working. Note: `gh pr edit --add-reviewer copilot` does NOT work — it cannot resolve this bot login.
 - **First-timer detection races**: If a contributor opens two PRs within the same hour, both will be treated as first-timer PRs. Acceptable edge case.
 - **LLM hallucinations**: Claude might occasionally flag a concern that isn't really there. The system prompt instructs it to err toward silence, but if you notice consistent false positives on a particular type of PR, add a clarifying example to the prompt's guidelines.
 - **Response to bot comments**: Contributors may reply to the bot comment with questions. Those replies will trigger `has_any_comment` on future runs and prevent duplicate comments — but nobody is automatically notified of replies. Consider adding a Slack notification for replies (similar to `issue_comment_bot.py`).

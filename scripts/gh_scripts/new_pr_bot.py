@@ -66,6 +66,10 @@ SCREENSHOT_GUIDE_URL = (
 CONTRIBUTING_URL = (
     'https://github.com/internetarchive/openlibrary/blob/master/CONTRIBUTING.md'
 )
+GITHUB_ATTACH_GUIDE_URL = (
+    'https://docs.github.com/en/get-started/writing-on-github/'
+    'working-with-advanced-formatting/attaching-files'
+)
 
 # CI check conclusions treated as "failing"
 # Excluded: 'cancelled' — cancelled runs usually mean a newer commit superseded the old run,
@@ -237,16 +241,86 @@ def is_ci_failing(repo: str, pr_number: int) -> bool:
     return result.returncode == 0 and 'fail' in result.stdout.lower()
 
 
-def get_issue_priority(repo: str, issue_number: str) -> int | None:
+def get_linked_issue_details(repo: str, issue_number: str) -> dict:
+    """Return priority, triaged status, and assigned status for a linked issue."""
     try:
         issue = gh_json(['api', f'repos/{repo}/issues/{issue_number}'])
+        priority = None
+        triaged = False
         for label in issue.get('labels', []):
-            m = re.match(r'Priority:\s*(\d+)', label.get('name', ''), re.IGNORECASE)
+            name = label.get('name', '')
+            m = re.match(r'Priority:\s*(\d+)', name, re.IGNORECASE)
             if m:
-                return int(m.group(1))
+                priority = int(m.group(1))
+                triaged = True
+        assignees = issue.get('assignees') or []
+        assigned = bool(assignees)
+        assignee_login = assignees[0].get('login') if assignees else None
+        return {
+            'priority': priority,
+            'triaged': triaged,
+            'assigned': assigned,
+            'assignee_login': assignee_login,
+        }
     except GHError:
-        pass
-    return None
+        return {'priority': None, 'triaged': None, 'assigned': None, 'assignee_login': None}
+
+
+def _priority_label_search(max_priority: int) -> str:
+    """Return a GitHub search label qualifier matching Priority 0..max_priority (OR).
+
+    GitHub search treats comma-separated label values as OR:
+      label:"Priority: 0","Priority: 1","Priority: 2"
+    """
+    labels = ','.join(
+        f'"Priority: {p}"' for p in range(min(max_priority, _MAX_PRIORITY) + 1)
+    )
+    return f'label:{labels}'
+
+
+def get_pr_queue_count(repo: str, max_priority: int | None) -> int:
+    """Count open non-draft PRs at equal or higher priority.
+
+    If max_priority is None (untriaged), counts all open non-draft PRs.
+    Only surfaced in comments when there is no PR assignee.
+    """
+    if max_priority is None:
+        search = 'draft:false'
+    else:
+        search = f'draft:false {_priority_label_search(max_priority)}'
+    try:
+        prs = gh_json([
+            'pr', 'list', '--repo', repo,
+            '--state', 'open',
+            '--search', search,
+            '--limit', '500', '--json', 'number',
+        ])
+        return len(prs)
+    except GHError:
+        return 0
+
+
+def get_assignee_pr_count(repo: str, assignee: str, max_priority: int | None) -> int:
+    """Count open non-draft PRs assigned to `assignee` at equal or higher priority.
+
+    If max_priority is None (untriaged), counts all open non-draft PRs for the assignee.
+    If max_priority is set, uses GitHub label OR syntax to match P0..Pmax in one query.
+    """
+    if max_priority is None:
+        search = 'draft:false'
+    else:
+        search = f'draft:false {_priority_label_search(max_priority)}'
+    try:
+        prs = gh_json([
+            'pr', 'list', '--repo', repo,
+            '--assignee', assignee,
+            '--state', 'open',
+            '--search', search,
+            '--limit', '200', '--json', 'number',
+        ])
+        return len(prs)
+    except GHError:
+        return 0
 
 
 def get_assignee_issue_count(repo: str, assignee: str, max_priority: int) -> int:
@@ -302,9 +376,17 @@ def get_commit_messages(repo: str, pr_number: int) -> list[str]:
 
 
 def request_copilot_review(repo: str, pr_number: int, dry_run: bool) -> bool:
-    """Returns True if the review was successfully requested (or dry-run)."""
+    """Returns True if the review was successfully requested (or dry-run).
+
+    Uses the REST API directly — 'gh pr edit --add-reviewer copilot' does not
+    resolve the Copilot bot. The correct slug is 'copilot-pull-request-reviewer[bot]'.
+    """
     return gh_run(
-        ['pr', 'edit', str(pr_number), '--repo', repo, '--add-reviewer', 'copilot'],
+        [
+            'api', f'repos/{repo}/pulls/{pr_number}/requested_reviewers',
+            '--method', 'POST',
+            '--field', 'reviewers[]=copilot-pull-request-reviewer[bot]',
+        ],
         dry_run=dry_run,
         action_desc=f'Request Copilot review on PR #{pr_number}',
     )
@@ -360,15 +442,32 @@ def process_pr(repo: str, pr: dict, dry_run: bool) -> dict | None:
     m = ISSUE_REF_RE.search(pr_body)
     linked_issue_number = m.group(1) if m else None
     linked_issue_priority = None
+    linked_issue_triaged = None
+    linked_issue_assigned = None
+    linked_issue_assignee = None
     assignee_issue_count = None
+    pr_queue_count = None
     if linked_issue_number:
-        linked_issue_priority = get_issue_priority(repo, linked_issue_number)
+        issue_details = get_linked_issue_details(repo, linked_issue_number)
+        linked_issue_priority = issue_details['priority']
+        linked_issue_triaged = issue_details['triaged']
+        linked_issue_assigned = issue_details['assigned']
+        linked_issue_assignee = issue_details['assignee_login']
         time.sleep(0.5)
     assignees = pr.get('assignees', [])
     if assignees and linked_issue_priority is not None:
         assignee_issue_count = get_assignee_issue_count(
             repo, assignees[0]['login'], linked_issue_priority
         )
+        time.sleep(0.5)
+    # Always compute queue count; pass None if untriaged (counts all open non-draft PRs)
+    pr_queue_count = get_pr_queue_count(repo, linked_issue_priority)
+    time.sleep(0.5)
+    # PR assignee takes precedence over issue assignee for workload count
+    pr_assignee_login = assignees[0]['login'] if assignees else linked_issue_assignee
+    assignee_pr_count = None
+    if pr_assignee_login:
+        assignee_pr_count = get_assignee_pr_count(repo, pr_assignee_login, linked_issue_priority)
         time.sleep(0.5)
 
     # Rich PR data for Claude's analysis
@@ -394,7 +493,13 @@ def process_pr(repo: str, pr: dict, dry_run: bool) -> dict | None:
         'has_issue_reference': has_ref,
         'linked_issue_number': linked_issue_number,
         'linked_issue_priority': linked_issue_priority,
+        'linked_issue_triaged': linked_issue_triaged,
+        'linked_issue_assigned': linked_issue_assigned,
+        'linked_issue_assignee': linked_issue_assignee,
         'assignee_issue_count': assignee_issue_count,
+        'pr_queue_count': pr_queue_count,
+        'pr_assignee_login': pr_assignee_login,
+        'assignee_pr_count': assignee_pr_count,
         'is_design_pr': is_design,
         'has_visual_evidence': visual,
         'ci_failing': ci_fail,
