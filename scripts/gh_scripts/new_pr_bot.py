@@ -67,11 +67,10 @@ CONTRIBUTING_URL = (
     'https://github.com/internetarchive/openlibrary/blob/master/CONTRIBUTING.md'
 )
 
-# Known Copilot reviewer logins — exact match to avoid false positives
-_COPILOT_LOGINS = frozenset({'copilot', 'github-copilot[bot]'})
-
 # CI check conclusions treated as "failing"
-_CI_FAILING_CONCLUSIONS = frozenset({'failure', 'timed_out', 'cancelled', 'action_required'})
+# Excluded: 'cancelled' — cancelled runs usually mean a newer commit superseded the old run,
+# not that CI is broken.
+_CI_FAILING_CONCLUSIONS = frozenset({'failure', 'timed_out', 'action_required'})
 
 # Priority labels: 0 (highest) … _MAX_PRIORITY; cap to avoid runaway API loops
 _MAX_PRIORITY = 2
@@ -172,12 +171,12 @@ def copilot_already_assigned(repo: str, pr_number: int) -> bool:
     try:
         requested = gh_json(['api', f'repos/{repo}/pulls/{pr_number}/requested_reviewers'])
         for user in requested.get('users', []):
-            if user.get('login', '').lower() in _COPILOT_LOGINS:
+            if 'copilot' in user.get('login', '').lower():
                 return True
         reviews = gh_json(['api', f'repos/{repo}/pulls/{pr_number}/reviews'])
         for review in reviews:
             login = (review.get('user') or {}).get('login', '').lower()
-            if login in _COPILOT_LOGINS:
+            if 'copilot' in login:
                 return True
     except GHError:
         pass

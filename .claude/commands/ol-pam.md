@@ -1,6 +1,6 @@
 Run the Open Library PAM (Project AI Manager).
 
-Parse $ARGUMENTS for `--workflow <name>` (default: `pr`), `--dry-run`, and `--hours <N>` (default: 1).
+Parse $ARGUMENTS for `--workflow <name>` (default: `pr`), `--dry-run`, `--hours <N>` (default: 1), and `--issue <N>`.
 
 ---
 
@@ -30,16 +30,38 @@ Always end every posted comment with `<!-- ol-pr-bot -->`.
 
 ## Workflow: issue-refinement
 
-*Coming soon.*
+Analyze and enrich a newly opened issue.
 
----
+Requires `--issue <N>` in $ARGUMENTS.
 
-## Workflow: exec-summary
+Read `scripts/gh_scripts/ISSUE_REFINEMENT_README.md` for the full guide.
 
-*Coming soon.*
+Follow the steps in that README for the given issue number. Apply labels where appropriate, then post a comment on the issue.
+
+- If `dry_run` is true: print the comment and label changes you would make, do not post or apply them.
+- Otherwise: apply labels with `gh issue edit {number} --repo internetarchive/openlibrary --add-label "..."` and post with `gh issue comment {number} --repo internetarchive/openlibrary --body "..."`
+
+Always end every posted comment with `<!-- ol-issue-bot -->`.
 
 ---
 
 ## Workflow: needs-response
 
-*Coming soon.*
+Review an issue labeled `Needs: Response` and take the appropriate action.
+
+Requires `--issue <N>` in $ARGUMENTS.
+
+Read `scripts/gh_scripts/NEEDS_RESPONSE_README.md` for the full guide.
+
+Follow the steps in that README for the given issue number.
+
+- If `dry_run` is true: print what you would do (post, remove label, or nothing) without taking any action.
+- Otherwise: act as described in the README.
+
+When in doubt, do nothing.
+
+---
+
+## Workflow: exec-summary
+
+*Coming soon — see FUTURE.md.*

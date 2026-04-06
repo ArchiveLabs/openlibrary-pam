@@ -71,19 +71,57 @@ The agent is invoked with the prompt in the **Scheduling** section below. It rea
 ### Comment structure Claude should follow
 
 ```
-:tada:  First-timer welcome                      (if first_contribution)
-        Assignee workload OR Mon/Fri triage msg   (if first_contribution)
-🤖      Copilot mention                           (if first_contribution)
+:tada:  First-timer welcome                         (if first_contribution)
+        Assignee workload OR Mon/Fri triage msg      (if first_contribution)
+🤖      Copilot review mention                       (if first_contribution)
 
-        Quality / test / git / template concerns  (Claude's judgment)
+⚠️     Missing issue reference                      (see guidance below)
+📝     PR description / template concerns            (see guidance below)
+🔀     Messy commit history                          (see guidance below)
+🧪     No testing evidence                           (see guidance below)
 
-📸      No screenshot                             (if is_design_pr and not has_visual_evidence)
-⛔      CI failing                                (if ci_failing)
+📸      No screenshot                                (if is_design_pr and not has_visual_evidence)
+⛔      CI failing                                   (additive only — see guidance below)
 
         Footer + <!-- ol-pr-bot --> marker
 ```
 
+**General rule: when in doubt, say nothing.** A false positive (nagging a contributor who did nothing wrong) is worse than a false negative. Each concern below has a clear threshold — only fire it when that threshold is clearly met.
+
 If nothing warrants a comment, post nothing.
+
+---
+
+### Quality concern guidance
+
+#### ⚠️ Missing issue reference
+- **Fire when**: `has_issue_reference` is false AND the PR is clearly implementing a feature or fixing a bug that should have a tracked issue (i.e. it's not a self-evident typo fix, pure docs update, or trivial config change).
+- **Don't fire when**: the PR title/description makes the change fully self-explanatory and an issue would be redundant.
+- **Say**: Briefly mention that PRs should reference the issue they address, and link to `CONTRIBUTING_URL`.
+
+#### 📝 PR description / template concerns
+- **Fire when**: the PR body is very short (under ~100 characters), is a near-empty template skeleton (sections are present but not filled in), or omits what the change does and how to verify it.
+- **Don't fire when**: the title and a short description together make the PR completely clear.
+- **Say**: Note the specific missing section(s), link to `PR_TEMPLATE_URL`.
+
+#### 🔀 Messy commit history
+- **Fire when**: `commit_messages` contains obvious WIP noise — messages like "WIP", "fix", "update", "temp", "fixup!", "asdf", or >5 commits for a change that reads as one logical unit.
+- **Don't fire when**: commits tell a clean story even if there are several, or the PR has just one or two commits regardless of phrasing.
+- **Say**: Suggest squashing or tidying up before review, link to `GIT_CHEATSHEET_URL`.
+
+#### 🧪 No testing evidence
+- **Fire when**: the PR touches substantive logic (>10 meaningful lines changed in non-trivial files), `test_files` is empty, and `has_visual_evidence` is false — i.e. there is no indication the change was tested.
+- **Don't fire when**: the PR is a pure refactor/rename, the change is so small that a test would be trivial, or the contributor already describes how they tested it in the body.
+- **Say**: Ask for a brief description of how this was tested, or a screenshot/test case demonstrating the behaviour.
+
+#### 📸 No screenshot (design PRs only)
+- **Fire when**: `is_design_pr` is true and `has_visual_evidence` is false.
+- **Say**: Ask for a before/after screenshot or screen recording, link to `SCREENSHOT_GUIDE_URL`.
+
+#### ⛔ CI failing — additive only
+- **Fire when**: `ci_failing` is true AND the comment already has at least one other section.
+- **Never** post a comment whose only content is the CI block.
+- **Say**: Note that CI is currently failing and link to `PRECOMMIT_GUIDE_URL` for common fixes. Reference the specific check name if you can infer it from the context.
 
 ---
 
@@ -113,11 +151,11 @@ Two practical reasons: mek's account holds the Copilot credits that make the rev
 
 ### Adjusting what Claude flags
 
-Edit `LLM_SYSTEM_PROMPT` in `new_pr_bot.py`. The guidelines for each field are clearly separated. Key levers:
+Edit the quality concern guidance section in this README. Claude reads it directly — no code changes required. Key levers:
 
-- To make Claude **less aggressive** about a concern: add "When in doubt, return null" or "Only flag if X is very obvious."
-- To make Claude **more specific**: add examples of what you want flagged or not flagged.
-- To **add a new concern type**: add a new field to the JSON schema, add a guideline section, and handle the new key in `build_comment()`.
+- To make Claude **less aggressive** about a concern: add "When in doubt, do not flag" or raise the threshold description.
+- To make Claude **more specific**: add examples of what should or shouldn't be flagged.
+- To **add a new concern type**: add a new signal to `new_pr_bot.py` (see "Adding a new hard-coded signal" below), then add a guidance section here.
 
 ### Changing the message text
 
