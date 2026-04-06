@@ -1,0 +1,1 @@
+# No Python dependencies — script uses only the gh CLI and stdlib.
