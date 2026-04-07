@@ -156,14 +156,18 @@ def get_recent_prs(repo: str, hours: float) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def check_comments(repo: str, pr_number: int) -> tuple[bool, bool]:
+def check_comments(repo: str, pr_number: int, pr_author: str) -> tuple[bool, bool]:
     """
-    Fetch PR comments once, return (has_any_comment, has_bot_marker).
+    Fetch PR comments once, return (has_non_author_comment, has_bot_marker).
+
+    A comment by the PR author themselves (e.g. a self-ping to a reviewer) does not
+    count as the PR being attended to — only comments from other users do.
     On API error, returns (True, False) — fail closed to avoid double-posting.
     """
     try:
         comments = gh_json(['api', f'repos/{repo}/issues/{pr_number}/comments'])
-        has_any = bool(comments)
+        non_author = [c for c in comments if c.get('user', {}).get('login') != pr_author]
+        has_any = bool(non_author)
         has_marker = any(BOT_MARKER in (c.get('body') or '') for c in comments)
         return has_any, has_marker
     except GHError:
@@ -412,7 +416,7 @@ def process_pr(repo: str, pr: dict, dry_run: bool) -> dict | None:
         return None
     time.sleep(0.5)
 
-    has_comments, has_marker = check_comments(repo, pr_number)
+    has_comments, has_marker = check_comments(repo, pr_number, author)
     if has_comments:
         print('  Already has comments — skipping.', file=sys.stderr)
         return None
