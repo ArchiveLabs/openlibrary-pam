@@ -156,18 +156,28 @@ def get_recent_prs(repo: str, hours: float) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def _is_copilot_login(login: str) -> bool:
+    return 'copilot' in login.lower()
+
+
 def check_comments(repo: str, pr_number: int, pr_author: str) -> tuple[bool, bool]:
     """
-    Fetch PR comments once, return (has_non_author_comment, has_bot_marker).
+    Fetch PR comments once, return (has_attended_comment, has_bot_marker).
 
-    A comment by the PR author themselves (e.g. a self-ping to a reviewer) does not
-    count as the PR being attended to — only comments from other users do.
+    Comments by the PR author or Copilot do not count as "attended to" —
+    only comments from other humans do. This means a PR where only the author
+    has self-pinged, or where Copilot has already reviewed, is still eligible
+    for our bot comment.
     On API error, returns (True, False) — fail closed to avoid double-posting.
     """
     try:
         comments = gh_json(['api', f'repos/{repo}/issues/{pr_number}/comments'])
-        non_author = [c for c in comments if c.get('user', {}).get('login') != pr_author]
-        has_any = bool(non_author)
+        attended = [
+            c for c in comments
+            if c.get('user', {}).get('login') != pr_author
+            and not _is_copilot_login(c.get('user', {}).get('login', ''))
+        ]
+        has_any = bool(attended)
         has_marker = any(BOT_MARKER in (c.get('body') or '') for c in comments)
         return has_any, has_marker
     except GHError:
@@ -411,24 +421,26 @@ def process_pr(repo: str, pr: dict, dry_run: bool) -> dict | None:
     author = pr.get('author', {}).get('login', 'unknown')
     print(f'PR #{pr_number}: "{pr.get("title", "")}" by @{author}', file=sys.stderr)
 
-    if copilot_already_assigned(repo, pr_number):
-        print('  Copilot already assigned — skipping.', file=sys.stderr)
-        return None
+    copilot_was_assigned = copilot_already_assigned(repo, pr_number)
     time.sleep(0.5)
 
     has_comments, has_marker = check_comments(repo, pr_number, author)
-    if has_comments:
-        print('  Already has comments — skipping.', file=sys.stderr)
-        return None
     if has_marker:
         print('  Bot marker found — skipping.', file=sys.stderr)
         return None
+    if has_comments:
+        print('  Already has human comments — skipping.', file=sys.stderr)
+        return None
     time.sleep(0.5)
 
-    # Assign Copilot
-    copilot_assigned = request_copilot_review(repo, pr_number, dry_run)
-    if not copilot_assigned:
-        print('  Copilot assignment failed — will include in output.', file=sys.stderr)
+    # Assign Copilot only if not already assigned
+    if copilot_was_assigned:
+        print('  Copilot already assigned — will note in comment.', file=sys.stderr)
+        copilot_assigned = True
+    else:
+        copilot_assigned = request_copilot_review(repo, pr_number, dry_run)
+        if not copilot_assigned:
+            print('  Copilot assignment failed — will include in output.', file=sys.stderr)
     time.sleep(1)
 
     # Gather signals
@@ -510,6 +522,7 @@ def process_pr(repo: str, pr: dict, dry_run: bool) -> dict | None:
         'has_visual_evidence': visual,
         'ci_failing': ci_fail,
         'copilot_assigned': copilot_assigned,
+        'copilot_was_preassigned': copilot_was_assigned,
         'files_changed': files_changed,
         'test_files': test_files,
         'commit_messages': commit_messages,
