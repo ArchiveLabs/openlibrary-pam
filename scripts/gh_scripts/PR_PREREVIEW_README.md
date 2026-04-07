@@ -95,9 +95,9 @@ Warm acknowledgment + project management context. Structure in this order:
    Second paragraph — use exactly one of these branches based on the data:
 
    - **If `pr_assignee_login` is set** (there is an effective reviewer):
-     - If `linked_issue_triaged` is false or null: start with "The linked issue hasn't been triaged yet — triage happens on Mondays and Fridays."
-     - Then on a new line: "@{pr_assignee_login} is assigned to this PR and currently has:" followed by a bullet:
+     - "@{pr_assignee_login} is assigned to this PR and currently has:" followed by a bullet:
        - `* {assignee_pr_count} open PR(s) of equal or higher priority to review first`
+     - Do **not** mention triage status when an assignee exists — it's not relevant to the contributor's wait.
 
    - **If `pr_assignee_login` is not set** (no effective reviewer):
      - If `linked_issue_triaged` is false or null: "The linked issue hasn't been triaged yet — triage happens on Mondays and Fridays. There are currently {pr_queue_count} open non-draft PRs ahead of yours."
@@ -107,9 +107,9 @@ Warm acknowledgment + project management context. Structure in this order:
 
 ---
 
-**Part 2 — Submitter action items (only if checklist items fail)**
+**Part 2 — Possible improvements for this PR (only if checklist items fail)**
 
-If any of the checklist items below require action from the contributor, surface them here as `- [ ]` items before the collapsed checklist. Apply the `Needs: Submitter Input` label to the PR.
+If any of the checklist items below require action from the contributor, surface them here under the heading `### Possible improvements for this PR` as `- [ ]` items before the collapsed checklist. Apply the `Needs: Submitter Input` label to the PR.
 
 Example items that belong here:
 - **PR description is empty or a near-empty template skeleton** — always surface this. If the body is just unfilled headings, say so explicitly and link to `PR_TEMPLATE_URL`. Do not let this slide even for small changes.

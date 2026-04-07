@@ -151,6 +151,24 @@ def get_recent_prs(repo: str, hours: float) -> list[dict]:
     return result
 
 
+def get_single_pr(repo: str, pr_number: int) -> list[dict]:
+    """Fetch a single PR by number regardless of age or draft status."""
+    data = gh_json([
+        'api', f'repos/{repo}/pulls/{pr_number}',
+    ])
+    return [{
+        'number': data['number'],
+        'title': data['title'],
+        'author': {'login': (data.get('user') or {}).get('login', 'unknown')},
+        'isDraft': data.get('draft', False),
+        'assignees': [{'login': a['login']} for a in data.get('assignees', [])],
+        'labels': [{'name': lb['name']} for lb in data.get('labels', [])],
+        'body': data.get('body') or '',
+        'url': data.get('html_url', ''),
+        'createdAt': data.get('created_at', ''),
+    }]
+
+
 # ---------------------------------------------------------------------------
 # Skip / idempotency checks
 # ---------------------------------------------------------------------------
@@ -553,18 +571,26 @@ def _get_parser() -> argparse.ArgumentParser:
         '--repo', default=DEFAULT_REPO,
         help=f'GitHub repo in owner/repo format (default: {DEFAULT_REPO})',
     )
+    parser.add_argument(
+        '--pr', type=int, default=None,
+        help='Target a single PR by number, bypassing the --hours window.',
+    )
     return parser
 
 
 def main() -> None:
     args = _get_parser().parse_args()
 
-    print(
-        f'Fetching non-draft PRs opened in the last {args.hours}h on {args.repo}...',
-        file=sys.stderr,
-    )
     try:
-        prs = get_recent_prs(args.repo, args.hours)
+        if args.pr:
+            print(f'Fetching PR #{args.pr} on {args.repo}...', file=sys.stderr)
+            prs = get_single_pr(args.repo, args.pr)
+        else:
+            print(
+                f'Fetching non-draft PRs opened in the last {args.hours}h on {args.repo}...',
+                file=sys.stderr,
+            )
+            prs = get_recent_prs(args.repo, args.hours)
     except GHError as exc:
         print(f'Failed to fetch PRs: {exc}', file=sys.stderr)
         sys.exit(1)
