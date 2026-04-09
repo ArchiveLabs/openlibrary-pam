@@ -161,7 +161,7 @@ The comment has four sections. Only include what applies — omit sections that 
 
 ### Section 1: Status Overview (for contributors)
 
-Open with `Thank you @{author} for submitting this issue!`
+Open with `Thank you @{author} for submitting this issue!` — **unless the author is a lead or staff member** (`mekarpeles`, `cdrini`, `jimchamp`, `hornc`, `scottbarnes`, `seabelis`, `RayBB`, `lokesh`), in which case omit this line entirely and go straight to the status.
 
 If the issue is ready: follow with a brief sentence stating what makes it ready (e.g. `Good First Issue`, clear acceptance criteria).
 
@@ -238,7 +238,7 @@ Collapsed inside `<details>`. This is a general ledger — fill it in for every 
 3. **Context section is evidence-based only.** Do not add anything to Context that wasn't found by actually reading code, commits, or searching issues/PRs.
 4. **Only reference public information** — no internal Slack, private discussions, or staff-only knowledge.
 5. **Never cc @mekarpeles.** Tag an area lead only when a specific decision genuinely requires them. At most one per comment.
-6. **Always end with** the Pam attribution note followed by `<!-- ol-issue-bot -->`:
+6. **Always end with** the Pam attribution note followed by `<!-- ol-issue-bot -->`. **Never mention Claude, Claude Code, or Anthropic anywhere in the comment.**
 
 ```markdown
 > [!NOTE]

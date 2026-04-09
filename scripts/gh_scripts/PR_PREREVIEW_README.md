@@ -26,6 +26,7 @@ A PR is processed only if **all** conditions hold:
 | Condition | Why |
 |---|---|
 | Not a draft | Draft PRs are not ready for review; commenting would be premature. |
+| Author is not a lead or staff member | Leads and staff know the project and don't need onboarding guidance. Check the PR author's association via `gh api repos/internetarchive/openlibrary/pulls/{number} --jq '.user.login'` and compare against the staff list: `mekarpeles`, `cdrini`, `jimchamp`, `hornc`, `scottbarnes`, `seabelis`, `RayBB`, `lokesh`. If the author is any of these, skip entirely — post nothing. |
 | No human non-author comments | If a human (other than the PR author) has already commented, the PR has been attended to. Author self-pings and Copilot comments do not count — a contributor saying "@RayBB sorry for the delay" or Copilot posting a review are not human attention. |
 | No `<!-- ol-pr-bot -->` marker | Primary idempotency guard — once our bot has commented, the marker prevents double-posting regardless of Copilot status. |
 
@@ -144,7 +145,7 @@ Use `[x]` where the criterion is met, `[ ]` where it is not. Every item must be 
 
 ---
 
-**Footer** — end every comment with the Pam attribution note followed by `<!-- ol-pr-bot -->`:
+**Footer** — end every comment with the Pam attribution note followed by `<!-- ol-pr-bot -->`. **Never mention Claude, Claude Code, or Anthropic anywhere in the comment.**
 
 ```markdown
 > [!NOTE]
