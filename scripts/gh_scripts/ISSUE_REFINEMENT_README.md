@@ -163,6 +163,13 @@ The comment has four sections. Only include what applies — omit sections that 
 
 Open with `Thank you @{author} for submitting this issue!` — **unless the author is a lead or staff member** (`mekarpeles`, `cdrini`, `jimchamp`, `hornc`, `scottbarnes`, `seabelis`, `RayBB`, `lokesh`), in which case omit this line entirely and go straight to the status.
 
+**If the issue has `Needs: Staff / Internal` label**, insert this block immediately after the thank you line (before any contributor-facing status):
+
+```markdown
+> [!WARNING]
+> This issue requires access to internal infrastructure, production systems, or institutional knowledge unavailable to community contributors. It can only be resolved by a maintainer or staff member.
+```
+
 If the issue is ready: follow with a brief sentence stating what makes it ready (e.g. `Good First Issue`, clear acceptance criteria).
 
 If not ready, follow with: `⚠️ *Contributors*, this issue will be ready to work on once:` and list only the blockers that apply:
