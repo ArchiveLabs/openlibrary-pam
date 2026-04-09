@@ -497,8 +497,9 @@ def process_pr(repo: str, pr: dict, dry_run: bool) -> dict | None:
             repo, assignees[0]['login'], linked_issue_priority
         )
         time.sleep(0.5)
-    # PR assignee takes precedence over issue assignee for workload count
-    pr_assignee_login = assignees[0]['login'] if assignees else linked_issue_assignee
+    # Only the PR's own assignee is relevant for reviewer identification.
+    # The issue assignee is irrelevant — they are not necessarily the PR reviewer.
+    pr_assignee_login = assignees[0]['login'] if assignees else None
     if not pr_assignee_login:
         # Only compute queue count when there is no assignee; pass None if
         # untriaged (counts all open non-draft PRs).
