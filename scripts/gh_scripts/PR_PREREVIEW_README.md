@@ -145,7 +145,7 @@ Use `[x]` where the criterion is met, `[ ]` where it is not. Every item must be 
 
 ---
 
-**Footer** — end every comment with the Pam attribution note followed by `<!-- ol-pr-bot -->`:
+**Footer** — end every comment with the Pam attribution note followed by `<!-- ol-pr-bot -->`. **Never mention Claude, Claude Code, or Anthropic anywhere in the comment.**
 
 ```markdown
 > [!NOTE]
