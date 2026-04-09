@@ -21,15 +21,15 @@ Without any automated first-touch, contributors either feel ignored or open foll
 
 ## Trigger logic: which PRs get processed
 
-A PR is processed only if **all three** conditions hold:
+A PR is processed only if **all** conditions hold:
 
 | Condition | Why |
 |---|---|
 | Not a draft | Draft PRs are not ready for review; commenting would be premature. |
-| No existing issue-thread comments | If anyone (human or bot) has already commented, the PR has been attended to. |
-| Copilot **not** already assigned as reviewer | This is the key signal: if Copilot is already on the PR, a staff member opened it and it doesn't need the community onboarding treatment. It also serves as the primary idempotency guard — once our bot runs, it assigns Copilot, so the next hourly run will skip this PR. |
+| No human non-author comments | If a human (other than the PR author) has already commented, the PR has been attended to. Author self-pings and Copilot comments do not count — a contributor saying "@RayBB sorry for the delay" or Copilot posting a review are not human attention. |
+| No `<!-- ol-pr-bot -->` marker | Primary idempotency guard — once our bot has commented, the marker prevents double-posting regardless of Copilot status. |
 
-A secondary idempotency guard (`<!-- ol-pr-bot -->` HTML comment embedded in every comment we post) protects against edge cases where the Copilot assignment fails but the comment succeeds.
+Copilot already being assigned is **not** a skip condition. If Copilot was pre-assigned (e.g. by a staff member), the bot still posts its comment but omits the "Copilot has been assigned" line and does not re-assign.
 
 ---
 
@@ -68,7 +68,8 @@ Signals gathered per PR:
 | `files_changed` | List of `{path, additions, deletions}` |
 | `test_files` | Patches of changed test files (capped at 2000 chars each) |
 | `commit_messages` | First line of each commit message |
-| `copilot_assigned` | Whether the Copilot assignment succeeded |
+| `copilot_assigned` | Whether Copilot is assigned (either pre-existing or newly assigned) |
+| `copilot_was_preassigned` | True if Copilot was already assigned before the bot ran — omit the "Copilot assigned" line from the comment in this case |
 | `dry_run` | True if `--dry-run` was passed |
 
 **Part 2 — Claude Code agent (reads JSON, writes comments)**
@@ -87,14 +88,16 @@ Warm acknowledgment + project management context. Structure in this order:
 1. Thank you line (+ first-timer welcome if `first_contribution` is true)
 2. **Reviewer expectations immediately after** — use the following logic to tell the contributor when and by whom their PR will be reviewed. Write this as separate paragraphs, not a wall of text.
 
-   First sentence (always): Copilot has been assigned for an initial review.
+   First sentence — Copilot reviewer line:
+   - If `copilot_was_preassigned` is true: omit any mention of assigning Copilot (it was already there). You may optionally note "Copilot has been assigned for an initial review." if contextually helpful, but do not say you assigned it.
+   - If `copilot_was_preassigned` is false: "🤖 Copilot has been assigned for an initial review."
 
    Second paragraph — use exactly one of these branches based on the data:
 
    - **If `pr_assignee_login` is set** (there is an effective reviewer):
-     - If `linked_issue_triaged` is false or null: start with "The linked issue hasn't been triaged yet — triage happens on Mondays and Fridays."
-     - Then on a new line: "@{pr_assignee_login} is assigned to this PR and currently has:" followed by a bullet:
+     - "@{pr_assignee_login} is assigned to this PR and currently has:" followed by a bullet:
        - `* {assignee_pr_count} open PR(s) of equal or higher priority to review first`
+     - Do **not** mention triage status when an assignee exists — it's not relevant to the contributor's wait.
 
    - **If `pr_assignee_login` is not set** (no effective reviewer):
      - If `linked_issue_triaged` is false or null: "The linked issue hasn't been triaged yet — triage happens on Mondays and Fridays. There are currently {pr_queue_count} open non-draft PRs ahead of yours."
@@ -104,9 +107,9 @@ Warm acknowledgment + project management context. Structure in this order:
 
 ---
 
-**Part 2 — Submitter action items (only if checklist items fail)**
+**Part 2 — Possible improvements for this PR (only if checklist items fail)**
 
-If any of the checklist items below require action from the contributor, surface them here as `- [ ]` items before the collapsed checklist. Apply the `Needs: Submitter Input` label to the PR.
+If any of the checklist items below require action from the contributor, surface them here under the heading `### Possible improvements for this PR` as `- [ ]` items before the collapsed checklist. Apply the `Needs: Submitter Input` label to the PR.
 
 Example items that belong here:
 - **PR description is empty or a near-empty template skeleton** — always surface this. If the body is just unfilled headings, say so explicitly and link to `PR_TEMPLATE_URL`. Do not let this slide even for small changes.
