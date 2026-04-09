@@ -116,6 +116,8 @@ Brief acknowledgment + project management context. **Do not describe, evaluate, 
      - "@{pr_assignee_login} is assigned to this PR and currently has:" followed by a bullet:
        - `* {assignee_pr_count} open PR(s) of equal or higher priority to review first`
      - Do **not** mention triage status when an assignee exists — it's not relevant to the contributor's wait.
+     - Do **not** mention the linked issue's assignee. `pr_assignee_login` may have been sourced from the issue, but to the contributor it is the PR reviewer — refer to it only as the PR assignee.
+     - Do **not** say anything like "the issue is self-assigned to you" or describe how the assignee was determined. Just state who is assigned to the PR.
 
    - **If `pr_assignee_login` is not set** (no effective reviewer):
      - If `linked_issue_triaged` is false or null: "The linked issue hasn't been triaged yet — triage happens on Mondays and Fridays. There are currently {pr_queue_count} open non-draft PRs ahead of yours."
