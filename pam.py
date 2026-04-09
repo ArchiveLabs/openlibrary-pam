@@ -101,25 +101,38 @@ def _gh_json(args: list[str]) -> object:
 
 
 def get_new_prs(since: str) -> list[dict]:
-    """Return non-draft PRs created since `since` (ISO timestamp)."""
+    """Return non-draft PRs created since `since` (ISO timestamp).
+
+    Uses the REST API directly (not search) to avoid GitHub's search-index lag,
+    which caused PRs created within the poll window to be permanently missed.
+    """
     prs = _gh_json([
-        'pr', 'list', '--repo', REPO,
-        '--search', f'created:>={since}',
-        '--limit', '50',
-        '--json', 'number,title,isDraft,createdAt',
+        'api', f'repos/{REPO}/pulls',
+        '--method', 'GET',
+        '-f', 'state=open',
+        '-f', 'sort=created',
+        '-f', 'direction=desc',
+        '-F', 'per_page=50',
+        '--jq', '[.[] | {number: .number, title: .title, isDraft: .draft, createdAt: .created_at}]',
     ])
-    return [p for p in prs if not p.get('isDraft')]
+    return [p for p in prs if p.get('createdAt', '') > since and not p.get('isDraft')]
 
 
 def get_new_issues(since: str) -> list[dict]:
-    """Return open issues created since `since` (ISO timestamp)."""
-    return _gh_json([
-        'issue', 'list', '--repo', REPO,
-        '--search', f'created:>={since}',
-        '--state', 'open',
-        '--limit', '50',
-        '--json', 'number,title,createdAt',
+    """Return open issues created since `since` (ISO timestamp).
+
+    Uses the REST API directly (not search) to avoid GitHub's search-index lag.
+    """
+    items = _gh_json([
+        'api', f'repos/{REPO}/issues',
+        '--method', 'GET',
+        '-f', 'state=open',
+        '-f', 'sort=created',
+        '-f', 'direction=desc',
+        '-F', 'per_page=50',
+        '--jq', '[.[] | select(.pull_request == null) | {number: .number, title: .title, createdAt: .created_at}]',
     ])
+    return [i for i in items if i.get('createdAt', '') > since]
 
 
 def issue_has_bot_marker(issue_number: int) -> bool:

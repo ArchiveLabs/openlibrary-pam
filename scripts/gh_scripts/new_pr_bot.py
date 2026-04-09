@@ -332,11 +332,14 @@ def get_pr_queue_count(repo: str, max_priority: int | None) -> int:
         return 0
 
 
-def get_assignee_pr_count(repo: str, assignee: str, max_priority: int | None) -> int:
+def get_assignee_pr_count(
+    repo: str, assignee: str, max_priority: int | None, exclude_pr: int | None = None
+) -> int:
     """Count open non-draft PRs assigned to `assignee` at equal or higher priority.
 
     If max_priority is None (untriaged), counts all open non-draft PRs for the assignee.
     If max_priority is set, uses GitHub label OR syntax to match P0..Pmax in one query.
+    `exclude_pr` is the current PR number, excluded so we count PRs *ahead* of it.
     """
     if max_priority is None:
         search = 'draft:false'
@@ -350,7 +353,7 @@ def get_assignee_pr_count(repo: str, assignee: str, max_priority: int | None) ->
             '--search', search,
             '--limit', '200', '--json', 'number',
         ])
-        return len(prs)
+        return sum(1 for p in prs if p['number'] != exclude_pr)
     except GHError:
         return 0
 
@@ -503,7 +506,9 @@ def process_pr(repo: str, pr: dict, dry_run: bool) -> dict | None:
         time.sleep(0.5)
     assignee_pr_count = None
     if pr_assignee_login:
-        assignee_pr_count = get_assignee_pr_count(repo, pr_assignee_login, linked_issue_priority)
+        assignee_pr_count = get_assignee_pr_count(
+            repo, pr_assignee_login, linked_issue_priority, exclude_pr=pr_number
+        )
         time.sleep(0.5)
 
     # Rich PR data for Claude's analysis

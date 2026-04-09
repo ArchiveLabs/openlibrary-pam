@@ -161,7 +161,7 @@ The comment has four sections. Only include what applies — omit sections that 
 
 ### Section 1: Status Overview (for contributors)
 
-Open with `Thank you @{author} for submitting this issue!`
+Open with `Thank you @{author} for submitting this issue!` — **unless the author is a lead or staff member** (`mekarpeles`, `cdrini`, `jimchamp`, `hornc`, `scottbarnes`, `seabelis`, `RayBB`, `lokesh`), in which case omit this line entirely and go straight to the status.
 
 If the issue is ready: follow with a brief sentence stating what makes it ready (e.g. `Good First Issue`, clear acceptance criteria).
 
